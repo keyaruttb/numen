@@ -1121,6 +1121,7 @@ _PUNCT_RE = re.compile(r"[\s，。！？、…~—\-（）()《》·「」【】
 
 
 from cardmix_habit import MixHabit  # noqa: E402
+from learn_mixin import LearnMixin  # noqa: E402  V8 主动学习（2026-11-17）
 from cardmix_store import MixStore
 
 
@@ -1138,7 +1139,7 @@ except Exception:
 _CONN_POOL_LOCK = threading.Lock()
 
 
-class MemoryCard(MixHabit, MixStore):
+class MemoryCard(MixHabit, LearnMixin, MixStore):
     # 2026-11-11（读写分离第 2 步）：self.db 现在是个「看当前线程」的门。
     # 普通调用仍然是主连接（行为与以前一模一样）；进了 reading() 之后，
     # 这个线程拿到的就是它自己的连接 —— 读请求因此不用再排在全局锁后面。
@@ -7005,6 +7006,25 @@ class MemoryCard(MixHabit, MixStore):
                     break
                 body = self.render(r, wn, query=query)
             line = ("- %s｜%s" % (_tag, body)) if _tag else ("- " + body)
+            # 🔧 V8（2026-11-17）：画面也是一等公民。
+            #    以前 media 表里只有「挂载 / 衰减 / 清理」这些管理动作，召回端一行
+            #    都不提它 —— 画面进了卡，却永远进不了她说话时的脑子。这里在每条被
+            #    想起的记忆后面缀上「｜[画面] caption」，并且照样守这一格的预算。
+            _mfrag = ""
+            try:
+                _mds = [x for x in (self.media_of(r["id"]) or []) if x.get("alive")]
+            except Exception:
+                _mds = []
+            if _mds:
+                _mds.sort(key=lambda x: -float(x.get("w") or 0.0))
+                _caps = [(x.get("caption") or "").strip()[:36] for x in _mds[:2]]
+                _caps = [c for c in _caps if c]
+                _tail = "；".join(_caps) if _caps else ("%d 张" % len(_mds))
+                _mfrag = "｜[画面]" + _tail
+                if used + len(line) + len(_mfrag) > cap4:
+                    _mfrag = ""
+            if _mfrag:
+                line += _mfrag
             # 🔧 V5.6.2：除了加工过的句子，再端一份原话。
             #    render() 为了让句子读起来顺，会做时间锚定、去壳、去引号，
             #    改写后的句子常常丢掉考题要的那几个字（人名/日期/数字）。

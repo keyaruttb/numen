@@ -1504,6 +1504,109 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(raw)
                 return None
+            if method == "POST" and path == "/media/attach":
+                # 2026-11-17（V8）：画面要能从服务端挂上来。以前只有离线脚本
+                # （media_import.py / media_video.py）能挂，外部工具、或者她自己在
+                # 会话里想把一张图记在某个瞬间上，根本没有入口。
+                # body: {mem_id|mem_text, sha256|path, caption, tags, kind, mime}
+                try:
+                    body = self._body()
+                except Exception as e:
+                    return self._fail(400, "bad_body", str(e)[:120])
+                import hashlib as _hl
+                caption = (body.get("caption") or "").strip()
+                kind = (body.get("kind") or "image").strip() or "image"
+                mime = (body.get("mime") or "image/webp").strip() or "image/webp"
+                tags = body.get("tags") or []
+                if isinstance(tags, str):
+                    tags = [t.strip() for t in tags.replace("，", ",").split(",") if t.strip()]
+                sha = (body.get("sha256") or "").strip().lower()
+                src_path = (body.get("path") or "").strip()
+                nbytes = int(body.get("bytes") or 0)
+                rel = ""
+                with m.lock:
+                    mem_id = body.get("mem_id")
+                    if not mem_id and body.get("mem_text"):
+                        row = m.card.db.execute(
+                            "SELECT id FROM mem WHERE raw LIKE ? ORDER BY id DESC LIMIT 1",
+                            ("%" + str(body.get("mem_text"))[:60] + "%",)).fetchone()
+                        mem_id = row[0] if row else None
+                    if not mem_id:
+                        return self._fail(400, "need_mem_id", "给 mem_id 或 mem_text")
+                    raw = b""
+                    if src_path:
+                        p = src_path if os.path.isabs(src_path) else os.path.join(
+                            m.card.card_dir, src_path)
+                        if not os.path.exists(p):
+                            return self._fail(400, "no_such_file", src_path)
+                        raw = open(p, "rb").read()
+                        nbytes = nbytes or len(raw)
+                        if not sha:
+                            sha = _hl.sha256(raw).hexdigest()
+                    if not sha or len(sha) != 64:
+                        return self._fail(400, "need_sha256_or_path", "给 sha256 或 path")
+                    if raw:
+                        # 落进卡的 media 目录（和 media_import.py 一个约定：按 sha 命名）
+                        ext = os.path.splitext(src_path)[1].lower() or ".webp"
+                        d = os.path.join(m.card.card_dir, "media")
+                        try:
+                            os.makedirs(d, exist_ok=True)
+                            fp = os.path.join(d, sha + ext)
+                            if not os.path.exists(fp):
+                                open(fp, "wb").write(raw)
+                            rel = os.path.relpath(fp, m.card.card_dir)
+                        except Exception as e:
+                            return self._fail(500, "media_store_failed", str(e)[:120])
+                    out = m.card.attach_media(
+                        mem_id, sha, caption=caption, tags=tags, kind=kind, mime=mime,
+                        path=rel, w=int(body.get("w") or 0), h=int(body.get("h") or 0),
+                        dur=float(body.get("dur") or 0.0), nbytes=nbytes,
+                        source=(body.get("source") or "user"))
+                    out["mem_id"] = int(mem_id)
+                    out["sha256"] = sha
+                    out["path"] = rel
+                    return self._send(200, out)
+            # ---- 主动学习（V8，2026-11-17）----
+            # 队列只记「想学什么」，材料和笔记由有网的那一侧交回来。
+            if path.startswith("/learn/"):
+                try:
+                    body = self._body() if method == "POST" else {}
+                except Exception:
+                    body = {}
+                with m.lock:
+                    if method == "GET" and path == "/learn/queue":
+                        try:
+                            st = m.card.learn_stats()
+                            q = m.card.learn_list(20)
+                            txt = m.card.learn_render()
+                        except Exception as e:
+                            return self._fail(500, "learn_broken", str(e)[:160])
+                        return self._send(200, {"ok": True, "stats": st,
+                                                "queue": q, "text": txt})
+                    if method == "POST" and path == "/learn/enqueue":
+                        topic = (body.get("topic") or "").strip()
+                        if not topic:
+                            return self._fail(400, "need_topic", "给 topic")
+                        try:
+                            prio = float(body.get("prio") or 0.5)
+                        except Exception:
+                            prio = 0.5
+                        out = m.card.learn_enqueue(topic, body.get("why") or "",
+                                                   body.get("source") or "self", prio)
+                        return self._send(200 if out.get("ok") else 400, out)
+                    if method == "POST" and path == "/learn/next":
+                        return self._send(200, m.card.learn_claim())
+                    if method == "POST" and path == "/learn/note":
+                        txt = (body.get("text") or body.get("note") or "").strip()
+                        if len(txt) < 6:
+                            return self._fail(400, "need_text", "给 text（至少 6 字）")
+                        out = m.card.learn_note(
+                            txt, topic=body.get("topic"),
+                            task_id=body.get("task_id"),
+                            tags=body.get("tags"),
+                            source=body.get("source") or "learn")
+                        return self._send(200 if out.get("ok") else 400, out)
+                return self._fail(404, "no_learn_route", path)
             if method == "GET" and path == "/dream/pending":
                 # 梦境压缩（卡侧）：把还没消化的对话原文掏出来给外面的提炼器。
                 # 顺手带上死信：失败过的批次要让人看得见、能重试，不能静默烂在库里。
