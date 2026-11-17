@@ -148,6 +148,42 @@ def looks_like_question(text):
     return any(k in t for k in _ASK)
 
 
+# 2026-11-17（V8.1）收紧：学习队列只收「真在问知识」的话。
+# 第一版把「你居然可以翻到旧存档，要不先把今天聊的落卡」这种请求也收进去了 ——
+# 那不是她该去查资料的问题，是让他干活。所以加两层闸：
+#   1) 命中 _NOT_LEARN 的一律跳过（请求/指令/系统操作/状态确认）；
+#   2) 必须带求知词（什么/怎么/为什么/哪/如何/原理/区别…），只带问号不算。
+_NOT_LEARN = ("帮我", "给我", "你先", "先把", "要不", "要不要", "可以吗", "可不可以",
+              "能不能帮", "落卡", "上传", "仓库", "github", "GitHub", "重启", "改一下",
+              "检查", "验证一下", "看看", "记住", "写进", "删掉", "安装", "配置",
+              "还在吗", "记得多少", "你是谁")
+_KNOW_QW = ("什么", "怎么", "为什么", "如何", "哪", "谁", "多少", "多久", "多长",
+            "原理", "区别", "意思", "定义", "机制", "起源", "怎么学", "想学")
+
+
+# 只认三类「值得去查」的话：
+#   1) 他明说要学（想学/教我/学一下/科普）；
+#   2) 他让我去查（查一下/搜一下/了解一下/讲讲）；
+#   3) 他问「X 是什么 / X 怎么来的 / X 什么原理」这种明确要知识的句子。
+# 聊天式问句（今天过得怎么样、不是吗、还在吗）一律不算 —— 宁可漏题，
+# 也别把她不该查的闲话塞进作业本，那比没有主动学习更糟。
+_LEARN_ASKS = ("想学", "教我", "学一下", "科普", "查一下", "搜一下", "了解一下",
+               "讲讲", "讲一下", "什么是", "是什么原理", "怎么来的", "怎么学")
+_NOT_LEARN = ("帮我", "给我", "先把", "落卡", "上传", "仓库", "重启", "改一下",
+              "检查", "删掉", "安装", "配置", "还在吗", "记得多少", "你是谁",
+              "过得怎么样", "余额", "抱歉", "不是吗", "嗯哼")
+
+
+def is_learn_topic(text):
+    """这句值不值得排进学习队列（宁可漏，也别把干活/闲聊的话塞进去）。"""
+    t = (text or "").strip()
+    if len(t) < 6 or len(t) > 120:
+        return False
+    if any(k in t for k in _NOT_LEARN):
+        return False
+    return any(k in t for k in _LEARN_ASKS)
+
+
 def seed_from(conn, texts, source="chat", limit=3, prio=0.6, now=None):
     out = []
     for t in texts or []:
@@ -156,7 +192,7 @@ def seed_from(conn, texts, source="chat", limit=3, prio=0.6, now=None):
         t = (t or "").strip().replace("\n", " ")
         if t.startswith("【") or t.startswith("["):
             continue
-        if not looks_like_question(t):
+        if not is_learn_topic(t):
             continue
         topic = t[:40]
         r = enqueue(conn, topic, why="他自己问过：" + t[:120], source=source, prio=prio, now=now)
@@ -176,3 +212,84 @@ def render_queue(conn, limit=8):
     if not rows:
         lines.append("- （空）")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- 后台节拍 ----
+# 2026-11-17（V8.1）加：卡自己不会上网，但它可以自己「决定去学什么」。
+# 每跳做两件事，都很便宜（一次 200 行的读 + 一次 UPDATE）：
+#   1) 把他最近的原话里像「问题」的那些收进队列（同样的 topic 会去重）；
+#   2) 冷却到点了、手上没有、队列里有活 —— 自己领一条，并在时间线上留一笔。
+# 真正去查资料的是有网的那一侧（宿主 agent / QQ 桥），它读 /learn/queue 看到
+# doing 的那条，才有「她今天在想什么」这件事。
+
+TICK_COOL_SEC = 6 * 3600.0   # 领一条之后至少隔 6 小时再领下一条
+SEED_HOURS = 24.0            # 只从最近 24 小时的原话里收问题
+SEED_LIMIT = 3               # 每跳最多收 3 条，避免把队列塞满
+
+
+def _meta_get(conn, k, default=None):
+    try:
+        r = conn.execute("SELECT val FROM meta WHERE key=?", (k,)).fetchone()
+        return r[0] if r else default
+    except Exception:
+        return default
+
+
+def _meta_set(conn, k, v):
+    try:
+        conn.execute(
+            "INSERT INTO meta(key,val) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET val=excluded.val", (k, str(v)))
+        conn.commit()
+    except Exception:
+        pass
+
+
+def tick(conn, now=None, seed_hours=None, seed_limit=None, cooldown=None):
+    """后台每跳调一次。返回 {seeded:[...], claimed:{...}|None, cooling:bool}。
+
+    不抛异常 —— 维护线程里的任何异常都会把整条循环打死，学习晚一轮没人察觉，
+    但维护停了十五分钟就会有人察觉。
+    """
+    now = time.time() if now is None else now
+    seed_hours = SEED_HOURS if seed_hours is None else float(seed_hours)
+    seed_limit = SEED_LIMIT if seed_limit is None else int(seed_limit)
+    cooldown = TICK_COOL_SEC if cooldown is None else float(cooldown)
+    out = {"seeded": [], "claimed": None, "cooling": False}
+    try:
+        _reap(conn, now)
+    except Exception as exc:
+        out["reap_err"] = str(exc)
+    # 1) 收问题
+    try:
+        rows = conn.execute(
+            "SELECT text FROM dialogue WHERE role='user' AND ts>=? "
+            "AND COALESCE(source,'') NOT IN ('qqprompt') "
+            "ORDER BY ts DESC LIMIT 200",
+            (now - seed_hours * 3600.0,),
+        ).fetchall()
+        out["seeded"] = seed_from(
+            conn, [r[0] for r in rows], source="chat",
+            limit=seed_limit, prio=0.55, now=now)
+    except Exception as exc:
+        out["seed_err"] = str(exc)
+    # 2) 冷却判定
+    try:
+        last = float(_meta_get(conn, "learn_tick_ts", 0) or 0)
+    except Exception:
+        last = 0.0
+    if now - last < cooldown:
+        out["cooling"] = True
+        return out
+    # 3) 手上没有就领一条（领了也不代表学会，得有人真去查）
+    try:
+        doing = conn.execute(
+            "SELECT COUNT(*) FROM learn_task WHERE status='doing'").fetchone()[0]
+        if not doing:
+            r = claim(conn, now=now)
+            out["claimed"] = r.get("task")
+            if out["claimed"]:
+                _meta_set(conn, "learn_tick_ts", now)
+    except Exception as exc:
+        out["claim_err"] = str(exc)
+    return out

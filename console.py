@@ -3142,6 +3142,23 @@ function loadLayers(){
     Number(dr.idle_hours||0).toFixed(1)+'h · '+
     (dr.due?'<b style="color:#e8b44a">到点了，该做梦</b>':'<span style="color:#3f5164">还没到</span>')+
     '</div>');
+  /* V8.1：学习队列。她自己在后台领的题（doing）、排队的、已经学会的，都在这儿露一面。 */
+  var lr=d.learn||{}, ls=lr.stats||{}, lt=lr.tasks||[];
+  var lhead='<div style="margin:6px 0"><span style="color:#e8b44a">学习</span> 排队 '+
+    '<b>'+esc(String(ls.queued||0))+'</b> · 在手 <b>'+esc(String(ls.doing||0))+
+    '</b> · 已学 '+esc(String(ls.done||0))+'（24h '+esc(String(ls.done_24h||0))+'）</div>';
+  out.push(lhead);
+  if(lt.length){
+    out.push(lt.slice(0,4).map(function(t){
+      var doing=(t.status==="doing");
+      return '<div style="color:'+(doing?'#2fd07d':'#9fb0c4')+'">'+
+        (doing?'● ':'○ ')+'#'+esc(String(t.id))+' '+esc(String(t.topic||"").slice(0,46))+
+        (t.why?' <span style="color:#6f7b8a">'+esc(String(t.why).slice(0,30))+'</span>':'')+
+        '</div>';
+    }).join(""));
+  }else{
+    out.push('<div style="color:#3f5164">队列空着 —— 想到什么要学的，我可以自己排进去</div>');
+  }
   box.innerHTML=out.join("");
 }
 
@@ -4796,6 +4813,12 @@ function refresh(){
        所以那张卡永远停在「加载中…」—— 面板看起来在，其实一直空着。 */
     if(document.getElementById("impList")) loadImpression();
     if(document.getElementById("layerBox")) loadLayers();
+    /* 2026-11-17：render() 在部分标签页里会**重建** layerBox，
+       直接把 loadLayers 填进去的内容冲成空 —— 现象是「学习/梦」两行时有时无。
+       下一拍再补一次，代价是一次纯前端的重绘。 */
+    setTimeout(function(){
+      if(document.getElementById("layerBox")) loadLayers();
+    }, 60);
   }).catch(function(e){
     S.alive=false; S.stamp="刷新失败："+e; renderSide();
   });

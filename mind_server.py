@@ -1720,6 +1720,14 @@ class Handler(BaseHTTPRequestHandler):
                         ov["dream"] = _dg
                     except Exception as e:
                         ov["dream"] = ov.get("dream") or {"err": str(e)}
+                    try:
+                        # V8.1：学习队列也上控制台。她自己领的题、他问过没答的题，
+                        # 都在这一格里 —— 不然「主动学习」装了也没人看得见它在动。
+                        import learn as _learn
+                        ov["learn"] = {"stats": _learn.stats(m.card.db),
+                                       "tasks": _learn.listing(m.card.db, limit=5)}
+                    except Exception as e:
+                        ov["learn"] = {"err": str(e)}
                 return self._send(200, ov)
             if method == "GET" and path == "/avatar":
                 # 头像文件本身。走文件不走数据库 —— 见 console.py 的说明。
@@ -3975,8 +3983,12 @@ def _start_maintenance(mind):
         hab_weak = int(os.environ.get("WHALE_HABITS_WEAK_TOP", "3") or 0)
     except Exception:
         hab_weak = 3
+    try:
+        lrn_sec = float(os.environ.get("WHALE_LEARN_SEC", "1800") or 0)
+    except Exception:
+        lrn_sec = 1800.0
 
-    last = {"fade": 0.0, "habits": 0.0, "worklog": 0.0, "ckpt": 0.0}
+    last = {"fade": 0.0, "habits": 0.0, "worklog": 0.0, "ckpt": 0.0, "learn": 0.0}
     # 线程起来就先记一次心跳：否则 /health 在第一个周期内会误报
     # maintenance_never_ran（明明刚启动，还没来得及跳第一跳）。
     mind._maint_last = time.time()
@@ -4156,6 +4168,33 @@ def _start_maintenance(mind):
                     print("[mind] 习惯挖掘失败: %s" % e)
                 finally:
                     mind.lock.release()
+
+            # 2.5) 主动学习（V8.1）：收问题进队 + 冷却到了自己领一条。
+            #     只写 learn_task / meta，不碰 mem、不动原文；领到就在时间线上
+            #     留一笔，控制台事件流里就能看见「她今天领了什么」。
+            #     真正去查资料的是有网的那一侧 —— 卡自己不上网，也不许假装学过。
+            if lrn_sec > 0 and now - last["learn"] >= lrn_sec:
+                try:
+                    import learn as _learn
+                    with mind.lock:
+                        _lr = _learn.tick(mind.card.db, now=now)
+                    last["learn"] = now
+                    _sd = _lr.get("seeded") or []
+                    if _sd:
+                        print("[mind] 学习：收问题 %d 条入队（%s）"
+                              % (len(_sd), "；".join(x["topic"][:18] for x in _sd)))
+                    _cl = _lr.get("claimed")
+                    if _cl:
+                        print("[mind] 学习：领到 #%s %s"
+                              % (_cl.get("id"), (_cl.get("topic") or "")[:40]))
+                        try:
+                            if mind.tl is not None:
+                                mind.tl.append("learn", "领学 #%s：%s" % (
+                                    _cl.get("id"), (_cl.get("topic") or "")[:60]))
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print("[mind] 学习节拍失败: %s" % e)
 
     t = threading.Thread(target=loop, name="maintenance", daemon=True)
     mind._maint_thread = t
