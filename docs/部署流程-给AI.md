@@ -185,13 +185,19 @@ python -X utf8 tools\install_to_dsh.py           # 真装
 ## 10. 备份（建议每周一次）
 
 ```powershell
-Invoke-RestMethod -Uri http://127.0.0.1:8848/snapshot -Method Post `
-  -Headers @{'X-Whale-Token'=$T;'Content-Type'='application/json'} -Body '{}'
+cd D:\card
+python -X utf8 snapshot.py make --note "weekly"
+python -X utf8 snapshot.py list
+python -X utf8 snapshot.py check        # 看上次是不是干净退出
 ```
 
-它会写一份 `snapshots/<时间>.db`。**回滚 = 停服务 → 用它覆盖 `card.db` → 起服务 → 看三个灯。**
+`make` 走 SQLite backup API 写 `snapshots/<时间>.db`，并算 sha256 + 行数一起登记。
+**回滚**：停服务 → `python -X utf8 snapshot.py restore <名字>`（它自己会先把当前库再备份一份）→ 起服务 → 看三个灯。
 
 > 别用文件管理器直接复制运行中的 `card.db` 当备份——WAL 里还有没并库的部分。
+> 要整盘搬走（换电脑、换目录）用 `python -X utf8 tools\portable.py plan <目标> ` 先 dry-run，
+> 再用 `build <目标> --confirm`，最后 `verify <包目录>` 对 sha256 清单。
+> 锚不能就地重建：`portable.py` 会把卡内锚导出成 carried 锚，新机器首次启动靠它比对。
 
 ---
 
