@@ -5860,6 +5860,10 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         f_end = hormone.f_endo(getattr(self, "h", hormone.H_BASE))
 
         _comp = {}
+        # 2026-11-18 实测：bench 200 题 damp=0.4 / 0.2 与 damp=1 命中**完全相同**（48/200），
+        #    真卡同句 damp=1 与 0.05 的 top-13 确实换了顺序 —— 说明乘子只改序、不改命中，
+        #    想靠削弱它救召回是白费。默认 1（完全不变），留作排查用的开关。
+        _MD = float(os.environ.get("WHALE_MULT_DAMP", "1") or 1)
 
         def _score_rows(cands, region_boost):
             # 🔧 T4-3：语义向量一次算完（矩阵乘法），不在 Python 里逐条循环
@@ -5938,7 +5942,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     elif _ou:
                         s *= OBJECT_BOOST_OTHER
                 # salience 乘子：这条本身有多重（对所有候选生效）
-                s *= (0.85 + 0.30 * r["salience"])
+                s *= ((0.85 + 0.30 * r["salience"])) ** _MD
                 # V5.4 时间窗加成：只给他本人说的话，30 天内越近越多
                 if _WINDOW_BONUS_ON and (r["speaker"] or "") == "user":
                     _age_s = max(0.0, now - r["last_active_ts"])
@@ -5970,7 +5974,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     _t = float(r["trust"] if "trust" in r.keys() else 1.0)
                     _cf = int(r["conflict"] if "conflict" in r.keys() else 0)
                     if _t < 1.0:
-                        s *= (0.5 + 0.5 * max(0.0, min(1.0, _t)))
+                        s *= ((0.5 + 0.5 * max(0.0, min(1.0, _t)))) ** _MD
                     if _cf == 1:
                         s *= CONFLICT_RECALL_PENALTY
                 except Exception:
@@ -5991,7 +5995,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     _src = ""
                 if (_src.startswith(GROUP_SOURCE_PREFIX) and not _group_ask
                         and not _self_ask):   # 我自己的话哪怕说在群里，也还是我的话
-                    s *= GROUP_RECALL_PENALTY
+                    s *= GROUP_RECALL_PENALTY ** _MD
                 # 2026-11-09：「你之前说过什么」→ 我自己的话抬一档
                 if _self_ask and (r["speaker"] or "") == "self":
                     s *= _self_boost
