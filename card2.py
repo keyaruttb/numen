@@ -5736,6 +5736,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         # ---- T4-2 时间窗预筛 ----
         # 问「今天」就别翻三年前的；问「以前」就不限。
         # 注意：只是**收窄候选**，不改打分 —— 收窄错了还有回退兜底。
+        _SPAN_RELAX_MIN = int(os.environ.get("WHALE_SPAN_RELAX_MIN", "400") or 400)
         win_days = query_time_window(query)
         span = query_time_span(query, now=now)
         if span is not None:
@@ -5788,6 +5789,13 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             # 收窄后太少（比如刚开学没聊过）就放宽，别把库筛空
             if len(narrowed) >= _min_keep:
                 rows = narrowed
+            # 🔧 2026-11-18 实验（默认关）：收窄过头就整段回退。
+            #    漏答归因里 13.3% 的题是被这一步误筛的（块检索能救回 75%），
+            #    说明「问今天」不该把「不是今天但就是答案」的那条彻底丢掉。
+            #    这里只在**非精确日**查询、且收窄后候选过少时回退全库。
+            if (os.environ.get("WHALE_SPAN_RELAX", "0") == "1"
+                    and not _precise and len(rows) < _SPAN_RELAX_MIN):
+                rows = _query_rows()
             if trace is not None:
                 _st = trace.setdefault("stages", {})
                 _st["after_span"] = len(rows)
@@ -5810,6 +5818,31 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             _self_rows = [r for r in rows if (r["speaker"] or "") == "self"]
             if len(_self_rows) >= 5:
                 rows = _self_rows
+        # 🔧 2026-11-18：字面精确通道，**默认开**（bench 200 题实测）。
+        #    「一碗鲸鱼饭」这种话，语义向量会把「鲸鱼」「饭」揉成邻域，
+        #    而原句里的字面组合是最强的证据；这里把问句实词直接 LIKE 捞一遍，
+        #    并进候选集（不覆盖原候选），让打分自己去挑。
+        #    实测（bench 417 题取前 200，同一批题、同一判定）：
+        #      base  39/200 = 19.5%（有证据轮 28.1%）
+        #      exact 47/200 = 23.5%（有证据轮 33.8%）  ← +4.0 / +5.7 点，无退步
+        #    WHALE_EXACT=0 可以关掉（排查用）。
+        if os.environ.get("WHALE_EXACT", "1") == "1":
+            _toks = [t for t in (q_keys or []) if len(t) >= 2][:6]
+            if _toks:
+                _seen = {r["id"] for r in rows}
+                _extra = []
+                for _t in _toks:
+                    try:
+                        _hits = c.execute(_SEL + "WHERE " + _LIVE + " AND m.raw LIKE ? LIMIT 80",
+                                          ("%" + _t + "%",)).fetchall()
+                    except sqlite3.OperationalError:
+                        _hits = []
+                    for _h in _hits:
+                        if _h["id"] not in _seen:
+                            _seen.add(_h["id"])
+                            _extra.append(_h)
+                if _extra:
+                    rows = list(rows) + _extra
         if trace is not None:
             _st = trace.setdefault("stages", {})
             _st["after_self"] = len(rows)

@@ -593,6 +593,21 @@ _RE_ACTION = re.compile(
     r"(拍|吃|喝|去|来|买|看|听|玩|打|聊|走|跑|写|读|做|见|找|送|带|拿|"
     r"收|寄|洗|做|学|练|唱|跳|坐|骑|开|关|睡|醒)")
 
+
+_RE_MD_MARK = re.compile(r"[*`_]{1,3}")
+_RE_MD_BULLET = re.compile(r"^\s*(?:[-–—>#]+|\d+[.)])\s*")
+
+
+def _de_md(s):
+    """剥掉 markdown 记号：加粗/斜体/代码点 + 行首列表符。
+
+    只洗「记号」，不洗内容 —— 去掉 ** 之后同一句话还是那句话，
+    但拆句不会再切出 `-**标题**半截` 这种主干。
+    """
+    s = _RE_MD_MARK.sub("", s or "")
+    s = _RE_MD_BULLET.sub("", s)
+    return s.strip()
+
 def split_memory(text):
     """把一句话拆成 主干 + 细节单元
 
@@ -605,6 +620,7 @@ def split_memory(text):
        会整段当主干，一辈子都不会褪色。
     """
     raw = (text or "").strip()
+    raw = _de_md(raw)
     details = []
 
     clauses = [s for s in re.split(r"[，。！？；、\n]+", raw) if s.strip()]
@@ -691,6 +707,7 @@ def split_memory(text):
        会整段当主干，一辈子都不会褪色。
     """
     raw = (text or "").strip()
+    raw = _de_md(raw)
     details = []
 
     clauses = [s for s in re.split(r"[，。！？；、\n]+", raw) if s.strip()]
