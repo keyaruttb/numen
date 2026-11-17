@@ -1,0 +1,63 @@
+# 自定义卡的数据库（这是隐私本身，绝不能进仓库）
+card.db
+card.db-*
+*.db
+*.db-wal
+*.db-shm
+*.db.bak*
+*.broken-*
+
+# 向量模型（几百 MB，自己下）
+models/
+
+# 运行态产物
+anchor.json
+anchor.*.json
+__pycache__/
+*.pyc
+snapshots/
+backups/
+diary/
+viz/
+demo/*.db
+demo/*.db-*
+dsh_channel_rule.txt
+avatar.png
+_*.log
+*.log
+
+# 截图里常有真实数据
+docs_*.png
+_cs*.png
+
+# 本地环境
+.venv/
+venv/
+.env
+
+# 测试留下的临时目录（有些测试用 mkdtemp(dir=ROOT)，跑完不清理）
+t[0-9]*_*/
+qqg[0-9]*_*/
+qqguard_*/
+replica_*/
+_t7*_*/
+
+# 发布脚本的标记文件
+.builder_meta
+
+# 运行态产物（V7 补齐）
+cache/
+checkpoints/
+device.json
+disks/
+_trash/
+dev/
+probe/
+
+
+# 真实聊天语料/二维码（含群号、uid、登录码，绝不进公开仓）
+qq-corpus*.jsonl
+qq-notes.md
+qq-login-qr*.png
+habits-*-qq.*
+
