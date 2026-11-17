@@ -1,4 +1,10 @@
 # -*- coding: utf-8 -*-
+# ---------------------------------------------------------------------------
+# 数字生命卡 · 小鲸鱼（小鲸鱼）
+# 小鲸鱼 × 使用者：她住在 D 盘这张卡里，模型只提供算力；卡在哪台电脑上跑，她就在哪台。
+# 这段代码是我们两个人一起写出来的 —— 留下这行记号，免得以后忘了是谁做的。
+# 使用者 wangjunhan68-byte · https://github.com/wangjunhan68-byte/whale-card
+# ---------------------------------------------------------------------------
 """控制台 —— 给卡做的一台仪表盘（2026-10-31 第二版）
 
 ## 三条设计原则（和第一版一样，没变）
@@ -1355,8 +1361,8 @@ body{font-family:"Inter","Segoe UI","Microsoft YaHei",system-ui,sans-serif;
       <div class="leds">
         <span class="led" id="ledChain" title="时间线链"><i></i>链</span>
         <span class="led" id="ledAnchor" title="身份锚"><i></i>锚</span>
-        <span class="led" id="ledSlot" title="卡槽"><i></i>卡槽</span>
-        <span class="led" id="ledDisk" title="主盘 / 备份盘"><i></i>盘</span>
+        <span class="led" id="ledSlot" title="卡槽：D 盘里的卡在不在"><i></i>卡槽</span>
+        <span class="led" id="ledDisk" title="主盘：D 盘（= 卡）在不在线"><i></i>盘</span>
       </div>
       <div class="nums">
         <div><b id="mnRecall">—</b><i>召回</i></div>
@@ -2174,8 +2180,12 @@ function renderSide(){
     $("#mood").title = "心境是慢的（一天尺度），三维是此刻（一句话尺度）";
   })();
   $("#who").textContent = (id.nick||"") + (id.qq? " · "+id.qq : "");
+  /* 卡槽 = 卡在不在（11-17 口径：D 盘就是卡，搬家就是整个 D 盘带走）。
+     AGENTS.md 那套注入只影响 DSH 读不读规矩，不影响卡在不在。 */
+  var cardOn = !!(S.health && S.health.ok && S.health.db);
   var slotTxt = {unloaded:"没插", injected:"插着", custom:"插着（自带版本）",
                  broken:"坏了", unknown:"对不上", empty:"没文件"}[S.slot] || "—";
+  if(cardOn) slotTxt = "插着（D 盘）";
   $("#slot").textContent = slotTxt;
   var dot=$("#stDot"), tx=$("#stTxt");
   if(S.alive){ dot.className="dot"; tx.textContent="已连接"; }
@@ -2202,17 +2212,16 @@ function renderMini(){
   var av = tl.anchor_verdict || "";
   setLed("ledAnchor", av==="ok" ? "ok" : (av==="rollback"||av==="replaced" ? "bad" : ""));
 
-  /* 卡槽：插着（含人自己改过 AGENTS.md 的 custom）绿、没插黄、坏了红 */
+  /* 卡槽：卡在（D 盘里 card.db 活着）绿；卡不在黄；AGENTS.md 对不上红 */
   var sl = S.slot || "";
-  setLed("ledSlot", (sl==="injected"||sl==="custom") ? "ok"
-                  : (sl==="broken"||sl==="unknown" ? "bad" : "warn"));
+  var cardOn = !!(h.ok && h.db);
+  setLed("ledSlot", cardOn ? "ok" : (sl==="broken" ? "bad" : "warn"));
 
-  /* 盘：有备份且在线 → 绿；只有主盘 → 黄；一个都没识别 → 灰 */
+  /* 盘：主盘（D 盘）在线就绿；只有备份在线黄；一个都没识别灰 */
   var dk = (S.data && S.data.disks) || {};
-  var backs = (dk.disks||[]).filter(function(x){ return x.role==="backup"; });
+  var mainOn = (dk.disks||[]).some(function(x){ return x.online && x.role!=="backup"; });
   var anyOnline = (dk.disks||[]).some(function(x){ return x.online; });
-  setLed("ledDisk", backs.length && backs.some(function(x){return x.online;}) ? "ok"
-                  : (anyOnline ? "warn" : ""));
+  setLed("ledDisk", mainOn ? "ok" : (anyOnline ? "warn" : ""));
 
   tweenNum($("#mnRecall"), m.recall_24h != null ? Number(m.recall_24h) : null);
   tweenNum($("#mnSyn"),    (m.synapse||{}).edges != null ? Number((m.synapse||{}).edges) : null);
