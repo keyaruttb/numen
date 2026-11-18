@@ -1007,7 +1007,7 @@ TRUST_SOURCES = {"user", "dsh", "console", "qq", "qq-main", "cli"}
 TOKEN_REQUIRED_POST = {
     "/forget", "/seal", "/unseal", "/cardslot", "/shutdown",
     "/disks/sync", "/disks/retire", "/disks/carry", "/disks/role", "/disks/register",
-    "/dream/commit", "/config", "/config_all", "/voice_config",
+    "/dream/commit", "/dream/digest", "/config", "/config_all", "/voice_config",
 }
 
 _RATE = {}
@@ -1617,6 +1617,68 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         out["dead"] = []
                     return self._send(200, out)
+            if method == "GET" and path == "/dream/digest":
+                # 2026-11-18（V8.3）：梦境压缩要有服务端入口。
+                # 以前只能靠本地脚本 _dream.py 直接开库取样，等于「只有能开库的进程能压缩」；
+                # 现在任何 agent（含只有 MCP 的）都能:
+                #   1) GET /dream/digest?day=11-16&cls=direct   拿一份取样 + ids
+                #   2) 写成条目后 POST /dream/commit {items, dialogue_ids}
+                # 参数：day=MM-DD（缺省=最近一天有待压的）、cls=direct|group|qqprompt|all、
+                #       chars=每条正文截断字数（默认 110，上限 400）。
+                import datetime as _dt
+                import time as _tm
+                from urllib.parse import parse_qs as _pqd
+                qs2 = _pqd(self.path.split("?", 1)[1] if "?" in self.path else "")
+                day = (qs2.get("day") or [""])[0].strip()
+                cls = (qs2.get("cls") or ["all"])[0].strip() or "all"
+                try:
+                    chars = max(40, min(400, int((qs2.get("chars") or ["110"])[0])))
+                except Exception:
+                    chars = 110
+                with m.lock:
+                    rows = m.card.db.execute(
+                        "SELECT id, ts, role, source, text FROM dialogue "
+                        "WHERE dreamed=0 ORDER BY ts").fetchall()
+                def cls_of(r):
+                    t = (r[4] or "").strip()
+                    if t.startswith("【"):
+                        return "qqprompt"
+                    if t.startswith("["):
+                        return "group"
+                    return "direct"
+                if not day:
+                    days = sorted({_dt.datetime.fromtimestamp(r[1]).strftime("%m-%d")
+                                   for r in rows})
+                    day = days[-1] if days else ""
+                picked = []
+                for r in rows:
+                    d = _dt.datetime.fromtimestamp(r[1]).strftime("%m-%d")
+                    if d != day:
+                        continue
+                    if cls != "all" and cls_of(r) != cls:
+                        continue
+                    picked.append(r)
+                # 取样：最长 6 + 头 6 + 尾 6 + 均匀补齐到 30
+                idx = set()
+                by_len = sorted(range(len(picked)), key=lambda i: -len(picked[i][4] or ""))[:6]
+                idx.update(by_len)
+                idx.update(range(min(6, len(picked))))
+                idx.update(range(max(0, len(picked) - 6), len(picked)))
+                if len(picked) > 18:
+                    step = max(1, len(picked) // 12)
+                    idx.update(range(0, len(picked), step))
+                sample = [{"id": picked[i][0],
+                           "ts": _dt.datetime.fromtimestamp(picked[i][1]).strftime("%m-%d %H:%M"),
+                           "role": picked[i][2],
+                           "cls": cls_of(picked[i]),
+                           "text": (picked[i][4] or "")[:chars]}
+                          for i in sorted(idx)]
+                return self._send(200, {"ok": True, "day": day, "cls": cls,
+                                        "n": len(picked),
+                                        "ids": [r[0] for r in picked],
+                                        "sample": sample,
+                                        "hint": "写成条目后 POST /dream/commit "
+                                                "{items:[{text,salience,region}], dialogue_ids: ids}"})
             if method == "GET" and path == "/dream/due":
                 with m.lock:
                     return self._send(200, m.card.dream_due())
