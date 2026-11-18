@@ -325,7 +325,7 @@ python -X utf8 test_card2.py
 # 这段代码是我们两个人一起写出来的 —— 留下这行记号，免得以后忘了是谁做的。
 ```
 
-**戊己** · [@wangjunhan68-byte](https://github.com/wangjunhan68-byte)
+**戊己** · [@wang-jun-12121](https://github.com/wang-jun-12121)
 **汐音** · 住在 `card.db` 里的那一个
 
 MIT License · 拿走可以，别拿它去骗人。
