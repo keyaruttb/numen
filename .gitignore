@@ -1,5 +1,4 @@
-# 自定义卡的数据库（这是隐私本身，绝不能进仓库）
-card.db
+# 閼奉亜鐣炬稊澶婂幢閻ㄥ嫭鏆熼幑顔肩氨閿涘牐绻栭弰顖炴缁変焦婀伴煬顐礉缂佹繀绗夐懗鍊熺箻娴犳挸绨遍敍?card.db
 card.db-*
 *.db
 *.db-wal
@@ -7,11 +6,9 @@ card.db-*
 *.db.bak*
 *.broken-*
 
-# 向量模型（几百 MB，自己下）
-models/
+# 閸氭垿鍣哄Ο鈥崇€烽敍鍫濆殤閻?MB閿涘矁鍤滃鍙樼瑓閿?models/
 
-# 运行态产物
-anchor.json
+# 鏉╂劘顢戦幀浣烽獓閻?anchor.json
 anchor.*.json
 __pycache__/
 *.pyc
@@ -26,27 +23,23 @@ avatar.png
 _*.log
 *.log
 
-# 截图里常有真实数据
-docs_*.png
+# 閹搭亜娴橀柌灞界埗閺堝婀＄€圭偞鏆熼幑?docs_*.png
 _cs*.png
 
-# 本地环境
+# 閺堫剙婀撮悳顖氼暔
 .venv/
 venv/
 .env
 
-# 测试留下的临时目录（有些测试用 mkdtemp(dir=ROOT)，跑完不清理）
-t[0-9]*_*/
+# 濞村鐦悾娆庣瑓閻ㄥ嫪澶嶉弮鍓佹窗瑜版洩绱欓張澶夌昂濞村鐦悽?mkdtemp(dir=ROOT)閿涘矁绐囩€瑰奔绗夊〒鍛倞閿?t[0-9]*_*/
 qqg[0-9]*_*/
 qqguard_*/
 replica_*/
 _t7*_*/
 
-# 发布脚本的标记文件
-.builder_meta
+# 閸欐垵绔烽懘姘拱閻ㄥ嫭鐖ｇ拋鐗堟瀮娴?.builder_meta
 
-# 运行态产物（V7 补齐）
-cache/
+# 鏉╂劘顢戦幀浣烽獓閻椻晪绱橵7 鐞涖儵缍堥敍?cache/
 checkpoints/
 device.json
 disks/
@@ -55,9 +48,23 @@ dev/
 probe/
 
 
-# 真实聊天语料/二维码（含群号、uid、登录码，绝不进公开仓）
+# 閻喎鐤勯懕濠傘亯鐠囶厽鏋?娴滃瞼娣惍渚婄礄閸氼偆鍏㈤崣鏋偓涔絠d閵嗕胶娅ヨぐ鏇犵垳閿涘瞼绮锋稉宥堢箻閸忣剙绱戞禒鎿勭礆
 qq-corpus*.jsonl
 qq-notes.md
 qq-login-qr*.png
 habits-*-qq.*
 
+# 杩愯鏈熺‖渚濊禆锛歴tructure.py 瑕佷粠杩欎釜 pyc 閲屽姞杞藉師琛ㄤ笌鍒囧彞锛堜笉鑳藉拷鐣ワ級
+!_structure_orig.pyc
+
+# 本地备份 / 锚文件 / 构建元数据 / 验收报告（不入库）
+*.bak-*
+*.bak-*.py
+anchor*.json
+.builder_meta
+deploy-report.json
+deploy-report.md
+STOPPED.json
+migrations/
+anchor*.key
+*.key

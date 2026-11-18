@@ -1240,6 +1240,10 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             self._conn_release(conn)
 
     def __init__(self, db_path=":memory:", clock=None, card_dir=None):
+        try:
+            self._schema_heal()
+        except Exception:
+            pass
         self.clock = clock or Clock()
         self.db_path = db_path
         # 承诺账本（2026-11-11 接进读侧）：表在同一个库里，但**不在 mem 池**——
@@ -4172,6 +4176,40 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     break
         score = max(0.0, min(1.0, score))
         return score, "、".join(why)
+
+    def _schema_heal(self):
+        """补齐老/新卡的结构差异（幂等）。
+
+        2026-11-18：全新卡的 mem 建表只有 45 列，而 remember() 会写
+        sess/who/place/ev_kind，导致空卡第一次写记忆就 "no such column: sess"；
+        inbox / timeline / mem_birth 也是懒建。这里在打开卡时补齐。
+        """
+        need = ("sess", "who", "place", "ev_kind")
+        try:
+            cols = set()
+            for r in self.db.execute("PRAGMA table_info(mem)").fetchall():
+                cols.add(r[1])
+            if cols:
+                for c in need:
+                    if c not in cols:
+                        try:
+                            self.db.execute(
+                                "ALTER TABLE mem ADD COLUMN %s TEXT NOT NULL DEFAULT ''" % c)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        try:
+            ensure = getattr(self, "_ensure_inbox", None)
+            if callable(ensure):
+                ensure()
+        except Exception:
+            pass
+        try:
+            import timeline as _tl
+            _tl.Timeline(self.db)
+        except Exception:
+            pass
 
     def inbox_pick(self, limit=40, hours=None, commit=False, min_score=None,
                    now=None):

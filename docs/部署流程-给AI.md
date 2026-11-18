@@ -1,5 +1,16 @@
 # 给 AI 的部署流程（机器可照做版）
 
+> **先读 [`DEPLOY.md`](../../DEPLOY.md)。** 那是唯一入口：三步部署、九项验收映射、故障表、
+> 以及「AI 部署安全约束」（不得擅改真卡 / 不可逆操作先备份再确认）。本文件是它的展开版。
+
+三个现成工具，别自己重写：
+
+- `python tools/doctor.py [--json]` —— 只读体检，`MUST 0` 才算环境就绪；
+- `python tools/accept.py [--card PATH] [--out DIR]` —— 在**临时副本**上跑 14 项断言并出报告，不碰真卡；
+- `python tools/migrate.py --from OLD --to NEW [--confirm]` —— 只读源 → SQLite backup → 清写租约 → 复验四项；
+  不加 `--confirm` 就是干跑，一个字节都不写。
+
+
 > 目标读者：**另一个 AI agent**，或照着步骤点按钮的人。
 > 每一步都有「怎么验证成功」和「失败时先看什么」。没写验证的步骤，不要当它成功了。
 >
