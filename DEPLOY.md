@@ -15,7 +15,8 @@
 | 把旧卡搬到新位置（带备份/确认） | `python tools/migrate.py --from 旧 --to 新 --confirm` |
 | 换掉人格（接自己的鱼） | 改 `core/` 三份文档 → `POST /identity` → `POST /seal` |
 
-版本：**v8.1**（2026-11-18）。卡是一张 SQLite 文件；模型只提供算力，记忆、情绪、身份全在这张卡里。
+版本：**v8.3.1**（2026-11-18）。卡是一张 SQLite 文件；模型只提供算力，记忆、情绪、身份全在这张卡里。
+给外部 AI 的操作手册见 [`START-HERE-FOR-AI.md`](START-HERE-FOR-AI.md)（九步 + 红线）。
 
 ---
 
@@ -32,7 +33,20 @@
 
 ---
 
-## 2. 从零部署（三步）
+## 2. 先判断：你是哪种部署？
+
+三种场景的「合格」标准不一样，`doctor.py --mode` 就是按这个分的：
+
+| 场景 | 特征 | 体检命令 | 合格标准 |
+|---|---|---|---|
+| **A 全新** | 没有 `card.db` | `--mode fresh` | 卡不存在**不算错**，其余 MUST 0 |
+| **B 接已有卡** | 手上有一张 `card.db` | `--mode existing` | 卡可读、链/锚/出生证过、MUST 0 |
+| **C 迁移** | 旧卡要搬到新位置/新机器 | `--mode migrate` | 旧卡只读可读、目标可写、迁完四项复验过 |
+
+不给 `--mode` 时是 `auto`：卡在 → existing，卡不在 → fresh。
+**judge 错了会出事**：把 B 当 A 部署会另外长出一张空卡；把 A 当 B 验会红一片。
+
+### 场景 A：从零部署（三步）
 
 ### 第 1 步：环境
 
@@ -43,7 +57,15 @@
 python -m pip install -r requirements.txt
 ```
 
-必需：`numpy`、`Pillow`、`requests`；可选：`psutil`（性能页）、`edge_tts`（语音）。
+| 级别 | 包 | 没装会怎样 |
+|---|---|---|
+| **必需** | `numpy` | 起不来（向量与记忆计算全靠它） |
+| **必需** | `Pillow` | 能跑，但媒体记忆/头像/缩略图报错 |
+| **必需** | `requests` | 能跑，联网脚本（B站/QQ探针、下载）报错 |
+| 建议 | `psutil` | 控制台少两块曲线图 |
+| 可选 | `edge_tts` | 不发语音条 |
+
+`tools/doctor.py` 把前三个当 MUST、后两个当 WARN。别装 `torch / transformers / sentence-transformers`——向量是 `embed_np.py` 用纯 numpy 手写前向，装了也用不上。
 
 ### 第 2 步：模型（语义记忆要用）
 
@@ -73,6 +95,26 @@ python bridge.py health                 # 起服务（默认 127.0.0.1:8848）
 ```bash
 python -c "import sys; sys.path.insert(0,'.'); from card2 import MemoryCard; MemoryCard('D:/card/card.db')"
 ```
+
+### 场景 B：接已有卡
+
+```bash
+python tools/doctor.py --mode existing --card D:\card.db --json   # 必须 MUST 0
+python tools/first_run.py --card D:\card.db
+```
+
+已有的卡**不要**重建、不要 remodel、不要跑 `make_demo_card.py`。想接进 DSH：
+`python tools/install_to_dsh.py --dry` 先看它打算做什么，确认后去掉 `--dry`（幂等）。
+
+### 场景 C：旧卡迁移
+
+```bash
+python tools/migrate.py --from D:\card.db --to E:\card\card.db          # 干跑，只打印计划
+python tools/migrate.py --from D:\card.db --to E:\card\card.db --confirm # 真跑
+```
+
+真跑会：备份目标（若存在）→ SQLite backup API 复制 → 清 `writer_lease` → 复验四项（链 / 出生证 / 条数 / 维度）→
+写 `migrations/<时间>.json`。**旧卡全程只读**，不加 `--confirm` 一个字节都不写。
 
 > 2026-11-18 修的一个坑：全新卡以前缺 `mem.sess/who/place/ev_kind` 四列和
 > `inbox/timeline/mem_birth` 三张表，第一次写记忆就报 `no such column: sess`。
@@ -138,6 +180,8 @@ curl -X POST http://127.0.0.1:8848/seal -H "Content-Type: application/json" -d "
 | `401` | 写了需要令牌的接口 | 令牌在 `<卡目录>/qq_state/api_token.txt`，放 `X-Whale-Token` 头 |
 | 控制台「卡槽 没文件」 | 卡没通过 `cardslot` 插进 DSH（`AGENTS.md` 不存在） | `POST /cardslot {"action":"inject"}`，或忽略（只影响 DSH 接入） |
 | 控制台「盘」黄 | 只有主盘在线，备份盘离线 | 插回备份盘，或用 `snapshot.py make` 到另一块盘 |
+| `[MUST] 模型完整性`：缺 config.json / vocab.txt / 权重 | 模型没下完或路径指错 | 重下整个模型目录；或用完整路径 `WHALE_EMBED_MODEL=<模型目录>` |
+| `[MUST] 模型匹配`：卡里 768 维但模型是 512 维 | 卡与模型混用了 | 768↔`bge-base-zh-v1.5`、512↔`bge-small-zh-v1.5`；换模型要 `python bridge.py remodel` 重建向量 |
 | 召回很差 | 没加载模型（降级成字面）或权重被环境变量改过 | `doctor.py` 看模型段；`SCORE_W` 默认 `(1.00,0.30,0,0)`，环境变量 `WHALE_EXACT=0` 可关精确通道 |
 | `[card2] 结构化抽取失败：bad magic number` | 随仓库的 `_structure_orig.pyc` 是 **Python 3.12** 编的 | 用 3.12 跑服务即可；3.13 下只降级 subj/verb/obj，不影响召回主链路 |
 | 服务端口冲突 | 8848 已占用 | `python mind_server.py --port 8899`，`bridge.py health` 也支持自定义端口 |

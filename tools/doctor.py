@@ -5,9 +5,18 @@ r"""体检：这台机器能不能跑这张卡。
      doctor 通过之后，才轮到 first_run（落地+起服务）和 accept（功能验收）。
 
 用法：
-    python tools/doctor.py                       # 给人看
+    python tools/doctor.py                       # 给人看（自动判模式）
     python tools/doctor.py --json                # 给 agent 看（结构化）
+    python tools/doctor.py --mode fresh          # 全新部署：还没有卡，卡不存在不算错
+    python tools/doctor.py --mode existing       # 已有卡：卡不存在 = MUST
+    python tools/doctor.py --mode migrate --card <旧卡>   # 待迁移：查旧卡可读 + 目标可写
     python tools/doctor.py --card D:\card.db --port 8848
+
+模式（--mode，默认 auto）：
+    auto     卡存在 → existing；卡不存在 → fresh（新用户第一次跑不会因为没卡就红一片）
+    fresh    允许没有卡；提示下一步用 make_demo_card.py 或 first_run.py 建卡
+    existing 必须有可读的卡；缺卡 / 打不开 = MUST
+    migrate  查「旧卡能不能读」+「目标目录能不能写」，不要求目标已存在
 
 它检查什么、怎么判：
     python   3.10+，能 import numpy
@@ -113,14 +122,25 @@ def check_pkgs():
 
 
 
-def check_card(card):
-    info = {"path": card, "dim": 0, "exists": False}
+def check_card(card, mode="auto"):
+    info = {"path": card, "dim": 0, "exists": False, "mode": mode}
     if not card:
+        if mode == "fresh":
+            ok("卡", "全新部署：还没有卡（这是正常的）")
+            return info
         must("卡", "没指定", "用 --card 指定，或把 card.db 放在仓库根目录")
         return info
     if not os.path.exists(card):
+        if mode == "fresh":
+            ok("卡", "全新部署：%s 还不存在（下一步会新建）" % card)
+            info["next_step"] = "python tools/first_run.py（或 make_demo_card.py 先来一张示例卡）"
+            return info
+        if mode == "migrate":
+            must("迁移源卡", "找不到 %s" % card,
+                 "把 --card 指向旧卡（那个真实存在的 card.db）")
+            return info
         must("卡", "找不到 %s" % card,
-             "全新部署：python tools/make_demo_card.py 先生成 demo 卡；"
+             "已有卡：把 --card 指到你的卡；全新部署：加 --mode fresh；"
              "迁移：python tools/migrate.py --from <旧卡> --to <新位置> --confirm")
         return info
     info["exists"] = True
@@ -158,13 +178,15 @@ def check_card(card):
 
 
 def model_dirs(card):
-    names = ["WHALE_MODELS", "WHALE_EMBED_DIR"]
+    names = ["WHALE_EMBED_MODEL", "WHALE_MODELS", "WHALE_EMBED_DIR"]
     out = [os.environ[n] for n in names if os.environ.get(n)]
     base = os.path.dirname(os.path.abspath(card)) if card else ROOT
     out += [os.path.join(base, "models"), os.path.join(ROOT, "models"),
             os.path.join(os.path.dirname(ROOT), "models"), "D:\\models"]
     seen, res = set(), []
     for d in out:
+        if d in ("base", "small"):
+            d = os.path.join(ROOT, "models", "bge-%s-zh-v1.5" % d)
         if d and d not in seen:
             seen.add(d)
             res.append(d)
@@ -174,7 +196,13 @@ def model_dirs(card):
 def check_models(info):
     dim = info.get("dim") or 0
     found = None
-    for d in model_dirs(info.get("path")):
+    # WHALE_EMBED_MODEL 直接指向某个模型目录时（最常见），把它拆成 父目录 + 名字
+    envm = (os.environ.get("WHALE_EMBED_MODEL") or "").strip()
+    if envm and os.path.isdir(envm) and os.path.exists(os.path.join(envm, "config.json")):
+        name = os.path.basename(envm.rstrip("\\/"))
+        parent = os.path.dirname(envm.rstrip("\\/")) or envm
+        found = (parent, [name])
+    for d in ([] if found else model_dirs(info.get("path"))):
         if os.path.isdir(d):
             subs = [s for s in os.listdir(d) if os.path.isdir(os.path.join(d, s))]
             if subs:
@@ -187,15 +215,44 @@ def check_models(info):
         return
     d, subs = found
     ok("模型目录", "%s → %s" % (d, ", ".join(subs[:4])))
+    want = "768" if dim >= 700 else ("512" if dim >= 500 else (str(dim) if dim else ""))
+    # 优先挑名字对得上的；挑不到就用第一个
+    pick = None
+    if want:
+        pick = next((x for x in subs if want in x), None)
+    if pick is None:
+        pick = subs[0]
+    mdir = os.path.join(d, pick)
+    # 完整性：config.json / vocab.txt / 一个够大的权重文件
+    prob = []
+    for f in ("config.json", "vocab.txt"):
+        if not os.path.exists(os.path.join(mdir, f)):
+            prob.append("缺 " + f)
+    weights = [f for f in os.listdir(mdir)
+               if f.endswith((".safetensors", ".bin", ".onnx", ".npz"))]
+    if not weights:
+        prob.append("缺权重文件（*.safetensors / *.bin / *.npz）")
+    else:
+        big = [f for f in weights if os.path.getsize(os.path.join(mdir, f)) > 1 << 20]
+        if not big:
+            prob.append("权重文件太小（%s），像是没下完" % ", ".join(weights[:2]))
+    if prob:
+        must("模型完整性", "%s：%s" % (pick, "；".join(prob)),
+             "重新下这个模型，或用 WHALE_EMBED_MODEL 指向一个完整的模型目录")
+    else:
+        ok("模型完整性", "%s（config/vocab/权重 都在）" % pick)
     if not dim:
         return
-    want = "768" if dim >= 700 else ("512" if dim >= 500 else str(dim))
-    hit = [s for s in subs if want in s or ("base" in s.lower() and dim >= 700)]
-    if hit:
-        ok("模型匹配", "卡里 %d 维 ↔ %s" % (dim, hit[0]))
-    else:
-        warn("模型匹配", "卡里 %d 维，目录里没有明显对得上的候选：%s" % (dim, ", ".join(subs[:4])),
-             "确认 /health 的 emb.model 与目录名一致；换模型要重建向量：python bridge.py remodel")
+    low = pick.lower()
+    matched = ((dim >= 700 and ("base" in low or "768" in low)) or
+               (500 <= dim < 700 and ("small" in low or "512" in low)) or
+               (dim < 500 and str(dim) in low))
+    if matched:
+        ok("模型匹配", "卡里 %d 维 ↔ %s" % (dim, pick))
+    elif want:
+        must("模型匹配", "卡里 %d 维，但模型是 %s" % (dim, pick),
+             "别混用：768 维配 bge-base-zh-v1.5、512 维配 bge-small-zh-v1.5；"
+             "要换模型就重建向量：python bridge.py remodel")
 
 
 def check_service(port, info):
@@ -288,14 +345,20 @@ def check_disk(card):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--card", default=os.environ.get("WHALE_DB", os.path.join(ROOT, "card.db")))
+    ap.add_argument("--mode", default="auto", choices=("auto", "fresh", "existing", "migrate"),
+                    help="部署场景：auto=卡在就 existing，不在就 fresh")
     ap.add_argument("--port", type=int, default=int(os.environ.get("WHALE_PORT", "8848")))
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
 
+    mode = a.mode
+    if mode == "auto":
+        mode = "existing" if os.path.exists(a.card) else "fresh"
+
     t0 = time.time()
     check_python()
     check_pkgs()
-    info = check_card(a.card)
+    info = check_card(a.card, mode)
     check_models(info)
     check_service(a.port, info)
     check_channel(info.get("path"))
@@ -304,10 +367,12 @@ def main():
     musts = [r for r in ROWS if r["level"] == "must"]
     warns = [r for r in ROWS if r["level"] == "warn"]
     out = {"ok": not musts, "must": len(musts), "warn": len(warns),
-           "card": a.card, "port": a.port, "rows": ROWS,
+           "card": a.card, "port": a.port, "mode": mode, "rows": ROWS,
            "seconds": round(time.time() - t0, 2),
            "next": ("先解决 MUST，再跑 python tools/first_run.py"
-                    if musts else "python tools/first_run.py → python tools/accept.py")}
+                    if musts else ("python tools/first_run.py → python tools/accept.py"
+                                   if mode != "migrate" else
+                                   "python tools/migrate.py --from <旧卡> --to <新位置> --confirm"))}
     if a.json:
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return 0 if not musts else 1
@@ -315,7 +380,7 @@ def main():
     icon = {"ok": "[ OK ]", "warn": "[WARN]", "must": "[MUST]"}
     print("=" * 68)
     print(" 数字生命卡 · 体检    %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
-    print(" 卡: %s" % a.card)
+    print(" 卡: %s    模式: %s" % (a.card, mode))
     print("=" * 68)
     for r in ROWS:
         print("%s %-16s %s" % (icon[r["level"]], r["key"], r["msg"]))
