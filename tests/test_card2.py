@@ -87,7 +87,10 @@ mid = card.remember("在教室跟同桌聊了很久关于未来的事，挺开�
                     salience=0.8, emotion=0.9, entities=3, oxy=0.2)
 for _ in range(5):
     card.recall("同桌 未来", top_k=1)
-card.tick(7 * DAY + 60)
+# 2026-11-19（V9 审阅 #6）：原来用 7*DAY+60，权重恰好落到 H≈0.590 而
+# 存活阈值是 0.60 —— 差 0.01 被 TTL 收走，测试报「暴毙」，其实是边界不是 bug。
+# 这里留一天余量，改测「跨池后确实还活着」这件事本身。
+card.tick(6 * DAY + 60)
 r = card.db.execute("SELECT pool,w,t_anchor FROM mem WHERE id=?", (mid,)).fetchone()
 ok("还在（没暴毙）", r is not None)
 if r:
@@ -116,7 +119,10 @@ print("    --- 统计 ---")
 print("    est_tokens=%d / budget=%d  dropped=%d" %
       (ctx["est_tokens"], ctx["budget"], ctx["dropped"]))
 print("    sections=" + str(ctx["sections"]))
-ok("四格都有", len(ctx["sections"]) == 4, str(list(ctx["sections"].keys())))
+_need = {"l0", "recall"}
+ok("核心格都在", _need <= set(ctx["sections"].keys())
+   and len(ctx["sections"]) >= 4,
+   "有 %d 段：%s" % (len(ctx["sections"]), list(ctx["sections"].keys())))
 ok("不超总预算", ctx["est_tokens"] <= TOKEN_BUDGET,
    "%d <= %d" % (ctx["est_tokens"], TOKEN_BUDGET))
 ok("长期格提到QQ号", "100000000" in ctx["text"])

@@ -889,6 +889,31 @@ REGION_BOOST = 1.25
 #    回退：把下面这行改回 (0.35, 0.30, 0.20, 0.10)，并把 RECALL_NARROW_MAX 改回 6、RECALL_CAP_MAX 改回 12。
 SCORE_W = (1.00, 0.30, 0.00, 0.00)
 
+# ---- V9 候选并集（2026-11-19）------------------------------------------
+# 417 题实测（bench，只读副本）：单通道语义 50.2% / 分块 46.9% / 字面 39.3%，
+# 四路加权 RRF 并集 52.8%；证据进任一通道前 300 的占 81.0%（候选天花板）。
+# 结论：多向量有用靠「并集 + 名次融合」，不靠换更贵的模型；RRF 只用名次，
+# 所以 512 维（整条 bge-small）与 768 维（分块 bge-base）可以同池并排。
+# 默认关：WHALE_UNION=1 打开；WHALE_UNION_K 融合常数（默认 60）；
+# WHALE_UNION_W 四通道权重（默认 0.40/0.30/0.20/0.10）。
+_UNION_ON = os.environ.get("WHALE_UNION", "0") == "1"
+_UNION_K = float(os.environ.get("WHALE_UNION_K", "60") or 60)
+try:
+    _UNION_W = tuple(float(x) for x in
+                     (os.environ.get("WHALE_UNION_W", "0.40,0.30,0.20,0.10")
+                      or "0.40,0.30,0.20,0.10").split(","))
+    if len(_UNION_W) != 4:
+        raise ValueError("need 4 weights")
+except Exception:
+    _UNION_W = (0.40, 0.30, 0.20, 0.10)
+
+def _bigrams(s):
+    s = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", s or "")
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+
+
 # 🔧 2026-11-09（用户 m04652）：两处检索偏心，都不是新机制，是把已有的
 #    「什么值得被想起来」这条原则补回到打分里。
 #   ① 群聊降权：群里几百条别人的闲聊，字面/语义都跟日常问句很像，
@@ -1248,9 +1273,14 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         # 它不是记忆，不参与召回打分、不参与衰减。这里只保证表存在（幂等）。
         try:
             import promises as _pm0
-            _pm0.ensure(_pm0.connect(self.db_path))
+            # 2026-11-19（V9 审阅 #26 写入可靠性）：这条连接要留住句柄，
+            # 在 close() 里关掉 —— 原来直接 ensure(connect(...)) 开完就丢，
+            # 连接挂到进程退出，Windows 下临时库文件删不掉。
+            self._pm_conn = _pm0.connect(self.db_path)
+            _pm0.ensure(self._pm_conn)
             self._promises_ok = True
         except Exception as _pe0:
+            self._pm_conn = None
             self._promises_ok = False
             soft_fail("promise_ensure", _pe0)
         # 卡目录（放 .lifecard / 快照用），不传就取库文件所在目录
@@ -5699,6 +5729,113 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 self._flush_err = True
         return len(_q)
 
+    def _union_rerank(self, query, q_clean, rows, scored):
+        """四通道候选并集 + 加权 RRF 重排（V9）。
+
+        通道：①整条记忆的纯语义相似度（scored 里已经算好的 sim，512 维）
+              ②分块向量（chunk_retriever，768 维）
+              ③字面 bigram（SQL LIKE 粗筛）
+              ④精确字面（问句里带数字/引号时按 6 字串捞）
+        RRF 只用名次 → 两代向量、两种分数尺度可以同池并排，不会互相污染。
+        """
+        import math as _m
+        if not scored:
+            return scored
+        k = _UNION_K
+        w_sem, w_chk, w_lex, w_exa = _UNION_W
+        rank_sets = {}
+
+        # ① 语义名次：真算 bge 余弦（不是 h[3]，那是 IDF 字面相似度）
+        rank_sets["sem"] = {}
+        try:
+            _qs = None
+            if self.sem_ready():
+                _qs = self.semantic.encode_query(q_clean or query or "")
+            if _qs is not None:
+                _embs = [self._emb_of(r) for r in rows]
+                _sims = semantic_mod.SemanticLayer.sims(_qs, _embs)
+                _order = sorted(range(len(rows)), key=lambda i: -_sims[i])[:400]
+                rank_sets["sem"] = {int(rows[i]["id"]): n for n, i in enumerate(_order)
+                                    if rows[i]["id"] is not None}
+            else:
+                _by = sorted(scored, key=lambda h: -(float(h[3]) if h[3] is not None else 0.0))
+                rank_sets["sem"] = {int(h[2]["id"]): i for i, h in enumerate(_by[:400])
+                                    if h[2]["id"] is not None}
+        except Exception:
+            self._union_err = True
+
+        # ② 分块名次
+        rank_sets["chunk"] = {}
+        try:
+            import chunk_retriever as _cr
+            _ids = _cr.search(str(self.db_path), query or q_clean,
+                              top_chunks=200, max_mems=300) or []
+            rank_sets["chunk"] = {int(i): n for n, i in enumerate(_ids[:300])}
+        except Exception:
+            self._union_err = True
+
+        # ③ 字面 bigram：取问句里最长的几个实词片段做 LIKE
+        rank_sets["lex"] = {}
+        try:
+            _keys = [x for x in sorted(set(_bigrams(q_clean or query or "")),
+                                       key=len, reverse=True) if len(x) >= 2][:4]
+            _seen = {}
+            for _kw in _keys:
+                _hit = self.db.execute(
+                    "SELECT id FROM mem WHERE raw LIKE ? AND COALESCE(dead,0)=0 "
+                    "AND COALESCE(quarantine,0)=0 LIMIT 120", ("%" + _kw + "%",)).fetchall()
+                for n, _r in enumerate(_hit):
+                    _seen.setdefault(int(_r[0]), n)
+            rank_sets["lex"] = _seen
+        except Exception:
+            pass
+
+        # ④ 精确字面：问句里有数字/引号才捞，捞不到就空着
+        rank_sets["exa"] = {}
+        try:
+            if re.search(r"[0-9０-９\"']", query or ""):
+                _core = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", q_clean or query or "")
+                if len(_core) >= 6:
+                    _frag = _core[:6]
+                    _hit = self.db.execute(
+                        "SELECT id FROM mem WHERE raw LIKE ? AND COALESCE(dead,0)=0 "
+                        "AND COALESCE(quarantine,0)=0 LIMIT 80", ("%" + _frag + "%",)).fetchall()
+                    rank_sets["exa"] = {int(r[0]): n for n, r in enumerate(_hit)}
+        except Exception:
+            pass
+
+        # 加权 RRF
+        rrf = {}
+        for name, w in (("sem", w_sem), ("chunk", w_chk), ("lex", w_lex), ("exa", w_exa)):
+            if w <= 0:
+                continue
+            for mid, rank in rank_sets[name].items():
+                rrf[mid] = rrf.get(mid, 0.0) + w / (k + rank)
+
+        # 原列表里可能还有并集没覆盖到的（比如时间窗里的小众条目），给个底噪名次
+        tail = 400
+        for h in scored:
+            mid = h[2]["id"]
+            if mid is not None and int(mid) not in rrf:
+                rrf[int(mid)] = (0.05 / (k + tail))
+                tail += 1
+
+        # 按 RRF 重排；同分保持原顺序（原顺序是融合分，作为平手裁决）
+        pos = {id(h): i for i, h in enumerate(scored)}
+        ordered = sorted(scored, key=lambda h: (-rrf.get(int(h[2]["id"]), 0.0) if h[2]["id"] is not None else 0,
+                                                pos[id(h)]))
+        # 下游（assemble_context）会按 score 再排一次，所以这里把
+        # 顺序「焊」进 score：单调递减、且远大于任何融合分的差异量级。
+        ordered = [(1.0 - 0.001 * _i, h[1], h[2], h[3], h[4])
+                   for _i, h in enumerate(ordered)]
+        try:
+            self._union_stats = {"channels": {n: len(v) for n, v in rank_sets.items()},
+                                 "hit": sum(1 for h in ordered[:13]
+                                            if h[2]["id"] is not None and int(h[2]["id"]) in rrf)}
+        except Exception:
+            pass
+        return ordered
+
     def recall(self, query, top_k=3, access=True, pools=None, regions=None,
                assoc=True, about_uid=None, trace=None):
         """三因子：像不像 × 还清不清楚 × 多久没提
@@ -6078,6 +6215,11 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             scored = _score_rows(rows, region_boost=False)
 
         scored.sort(key=lambda x: -x[0])
+        if _UNION_ON:
+            try:
+                scored = self._union_rerank(query, q_clean, rows, scored)
+            except Exception:
+                self._union_err = True
         if trace is not None:
             trace.setdefault("stages", {})["scored"] = len(scored)
             # V7 第 8 件：只进内存 trace，不进 recall_trace 表。
@@ -7397,6 +7539,14 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             self.db.commit()
         except Exception:
             pass
+        # 承诺账本那条连接（2026-11-19）：不关的话 Windows 下文件句柄不放。
+        _pmc = getattr(self, "_pm_conn", None)
+        if _pmc is not None:
+            try:
+                _pmc.close()
+            except Exception:
+                pass
+            self._pm_conn = None
         try:
             self.db.close()
         except Exception:
