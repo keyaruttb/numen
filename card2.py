@@ -6903,6 +6903,32 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             recent_lines=recent_lines,
             db=self.db)
         q = plan["budget"]
+        # ---- 证据段硬配额（实验臂，2026-11-19）----------------------------
+        # 默认 0.35（2026-11-19 实测：417 题有证据轮 139/305=45.6% → 144/305=47.2%；
+        # 真卡 23 条尺子不变 62.5/75/100；0.45 反而回落到 46.8%，所以停在 0.35）。
+        # WHALE_EVID_QUOTA=0 关掉，回到按场景权重分。
+        # 差额只从「人格 / 长期」两格里挪，且各自留底线（10% / 5%），
+        # 近上下文（recent）与状态不动 —— 那两格是「此刻」的锚，动了她会接不上话。
+        try:
+            _eq = float(os.environ.get("WHALE_EVID_QUOTA", "0.35") or 0)
+        except Exception:
+            _eq = 0.0
+        if _eq > 0:
+            _tot = int(plan.get("total") or sum(int(v or 0) for v in q.values()))
+            _need = int(_eq * _tot)
+            _cur = int(q.get("recall") or 0)
+            if _need > _cur and _tot > 0:
+                _add_left = _need - _cur
+                for _k, _floor in (("identity", 0.10), ("longterm", 0.05)):
+                    if _add_left <= 0:
+                        break
+                    _low = int(_tot * _floor)
+                    _avail = max(0, int(q.get(_k) or 0) - _low)
+                    _mv = min(_avail, _add_left)
+                    if _mv > 0:
+                        q[_k] = int(q.get(_k) or 0) - _mv
+                        _add_left -= _mv
+                q["recall"] = _cur + (_need - _cur - _add_left)
         self.turn_count = (turns or 0) + 1
         self.last_talk_ts = now
 
