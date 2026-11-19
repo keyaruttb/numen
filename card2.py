@@ -1240,10 +1240,8 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             self._conn_release(conn)
 
     def __init__(self, db_path=":memory:", clock=None, card_dir=None):
-        try:
-            self._schema_heal()
-        except Exception:
-            pass
+        # 2026-11-19：这里原来先调了一次 _schema_heal()，但那时 self.db / db_path 还没就位，
+        # 异常被 except 吞掉 —— 等于没补。真正的补齐挪到 _init_schema()/_migrate() 之后。
         self.clock = clock or Clock()
         self.db_path = db_path
         # 承诺账本（2026-11-11 接进读侧）：表在同一个库里，但**不在 mem 池**——
@@ -1312,6 +1310,12 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         self._session_hit_ids = set()
         self._init_schema()
         self._migrate()
+        # 2026-11-19：结构补齐放在建表/迁移之后（全新卡的 mem 只有 45 列，而 remember()
+        # 要写 sess/who/place/ev_kind；inbox/timeline/mem_birth 也是懒建）。幂等。
+        try:
+            self._schema_heal()
+        except Exception:
+            pass
         self._ensure_soft_cols()
         self._ensure_cond_table()
         # 运行时配置表（V5.0 §10.9）：场景权重能热改，不用重启服务。
