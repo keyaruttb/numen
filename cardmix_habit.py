@@ -66,7 +66,15 @@ class MixHabit(object):
         if not hit:
             return cand[:limit]
         hit.sort(key=lambda x: (-x[0], x[1]))
-        return [x[2] for x in hit[:limit]]
+        # 命中的先上，不够 limit 就用权重序里的其它行补齐（别只剩一行）
+        picked = [x[2] for x in hit[:limit]]
+        if len(picked) < limit:
+            for line in cand:
+                if len(picked) >= limit:
+                    break
+                if line not in picked:
+                    picked.append(line)
+        return picked
 
     def impression_snapshot(self):
         return impression_mod.snapshot(self.db)
