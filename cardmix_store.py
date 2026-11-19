@@ -381,16 +381,11 @@ class MixStore:
         #    印象层的出口是 hint_lines —— 那句子的主语是「他常说」，
         #    自己的话一旦混进来，她就会把自己的技术日志当成他的口头禅。
         #    所以：自己的话不进印象层。她自己的说话习惯归 habits 层（那边挖的是 self）。
+        # 2026-11-20：印象的写入抽成独立口子（_impress_write），
+        #    它有自己的触发与失败边界，不再散在 remember 的流程里。
+        #    语义不变：自己的话不进印象层（否则会把她自己的开发日志当成他的口头禅）。
         if (speaker or "") != "self":
-            try:
-                impression_mod.observe(
-                    self.db,
-                    subject=(about_uid or ("user" if (speaker or "") == "user" else "")),
-                    text=text, ts=(ts if ts is not None else self.clock.now()),
-                    subject_kind=("person" if (about_uid or speaker) else "thing"),
-                    now=self.clock.now())
-            except Exception as _ie:
-                print("[card2] 印象记账失败: %s" % _ie)
+            self._impress_write(text, ts=ts, speaker=speaker, about_uid=about_uid)
 
         # ---- 事实层（V5.7）：抽「谁 · 什么事 · 什么」-------------------------
         # 只做索引，不改原文。抽不出就不抽（宁可少一条，不要错一条）。

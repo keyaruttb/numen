@@ -5753,6 +5753,13 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 self.synapse.reinforce([r["id"] for _s, _w, r in _sl])
             except Exception:
                 self._effects_err = True
+            # 2026-11-20：联想带出来的旧记忆 → 间接印象（打折、低频）。
+            try:
+                _aids = getattr(self, "_last_assoc_ids", None)
+                if _aids:
+                    self._impress_from_assoc(_aids)
+            except Exception:
+                self._effects_err = True
         except Exception:
             self._effects_err = True
 
@@ -7579,7 +7586,16 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         #     只描述、不预测、不当台词：这里进来的每一句都必须是"发生过 N 次的事"，
         #     而不是"他大概会怎样"。
         try:
-            _ilines = self.impression_hints(limit=3)
+            # 2026-11-20：印象作为独立组装件 —— 自己的触发、按这句话选。
+            #    WHALE_IMPRESSION=0 整个关掉；选择器空/词面不重合时退回权重序。
+            if os.environ.get("WHALE_IMPRESSION", "1") == "0":
+                _ilines = []
+            elif hasattr(self, "impression_hints_for"):
+                _ilines = self.impression_hints_for(query or "", limit=3)
+                if not _ilines:
+                    _ilines = self.impression_hints(limit=3)
+            else:
+                _ilines = self.impression_hints(limit=3)
         except Exception:
             _ilines = []
         if _ilines:

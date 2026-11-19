@@ -39,11 +39,93 @@ class MixHabit(object):
     def impression_hints(self, subject=None, limit=3, min_w=None):
         return impression_mod.hint_lines(self.db, subject=subject, limit=limit, min_w=min_w)
 
+    def impression_hints_for(self, query="", subject=None, limit=3, min_w=None, pool=12):
+        """按「这句话」挑印象（2026-11-20）。
+
+        原来的读法是固定取权重最高的三条 —— 于是不管问什么，蹦出来的都是
+        「他常说『回来了回来了』」。印象该有自己的选择：先在候选池里，
+        按与这句话的字面重合重排，重合都一样才退回原来的权重序。
+        """
+        try:
+            cand = list(impression_mod.hint_lines(self.db, subject=subject,
+                                                  limit=pool, min_w=min_w) or [])
+        except Exception:
+            return []
+        if not cand or not query:
+            return cand[:limit]
+
+        def _g(s):
+            t = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", str(s or ""))
+            return set(t[i:i + 2] for i in range(len(t) - 1))
+
+        qg = _g(query)
+        if not qg:
+            return cand[:limit]
+        scored = [(len(qg & _g(line)), _i, line) for _i, line in enumerate(cand)]
+        hit = [x for x in scored if x[0] > 0]
+        if not hit:
+            return cand[:limit]
+        hit.sort(key=lambda x: (-x[0], x[1]))
+        return [x[2] for x in hit[:limit]]
+
     def impression_snapshot(self):
         return impression_mod.snapshot(self.db)
 
     def impression_fade(self, now=None):
         return impression_mod.fade(self.db, now=now if now is not None else self.clock.now())
+
+    def _impress_from_assoc(self, ids, now=None):
+        """联想带出来的旧记忆 → 间接印象（打折、低频）。2026-11-20。"""
+        if os.environ.get("WHALE_IMPRESSION", "1") == "0":
+            return 0
+        ids = [int(i) for i in (ids or [])][:2]
+        if not ids:
+            return 0
+        now = float(now if now is not None else self.clock.now())
+        try:
+            _last = self._meta_float("imp_assoc_ts")
+        except Exception:
+            _last = 0.0
+        if now - _last < 1800:      # 半小时只闻一次，别把联想变成记仇
+            return 0
+        done = 0
+        try:
+            q = ("SELECT id, raw, speaker FROM mem WHERE id IN (%s)"
+                 % ",".join("?" * len(ids)))
+            for r in self.db.execute(q, ids).fetchall():
+                raw = r[1] if not isinstance(r, dict) else r["raw"]
+                spk = r[2] if not isinstance(r, dict) else r["speaker"]
+                if str(spk or "") == "self":
+                    continue
+                if self._impress_write(str(raw or ""), now=now, via="indirect"):
+                    done += 1
+        except Exception as _ae:
+            print("[card2] 联想印象失败: %s" % _ae)
+            return 0
+        if done:
+            try:
+                self._set_meta_float("imp_assoc_ts", now)
+            except Exception:
+                pass
+        return done
+
+    def _impress_write(self, text, ts=None, speaker="user", about_uid=None, via="direct"):
+        """印象写入的独立入口（2026-11-20）。
+
+        放进 MixHabit 而不是散在 remember 里：印象层有自己的触发点和失败边界，
+        写坏了不该把整条记忆写入带崩。语义没变 —— 只记别人的话。
+        """
+        try:
+            impression_mod.observe(
+                self.db,
+                subject=(about_uid or ("user" if (speaker or "") == "user" else "")),
+                text=text, ts=(ts if ts is not None else self.clock.now()),
+                subject_kind=("person" if (about_uid or speaker) else "thing"),
+                now=self.clock.now(), via=via)
+            return True
+        except Exception as _ie:
+            print("[card2] 印象记账失败: %s" % _ie)
+            return False
 
     def habit_hints(self, limit=5, max_chars=220):
         """从 habits 表捞几条稳定习惯，拼成短句给【我是谁】用。
