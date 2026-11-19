@@ -2024,6 +2024,21 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 res = None
         if res is not None:
             self.v = link.apply_to(v, res, dt, now=now)
+            # 2026-11-20 V9.3：这一句的身体反应也磨一次评价印象。
+            #   r 用 RPE（比预期好/差多少），场景用 emotion_link 判出来的 scenario，
+            #   人物维度按当前对话对象（他）记。慢磨：一条只挪 0.08 量级的步长。
+            try:
+                _rpe = float(getattr(res, "rpe", 0.0) or 0.0)
+                _sc = str(getattr(res, "scenario", "") or "generic")
+                _uid = None
+                try:
+                    _uid = self._affect_uid()
+                except Exception:
+                    _uid = None
+                if abs(_rpe) >= 0.02:
+                    self._affect_learn(_rpe, _sc, _uid, text)
+            except Exception:
+                pass
         else:
             events = viscera.guess(text, emotion)
             self.v = viscera.step(v, dt, events)
@@ -3336,6 +3351,16 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         return {"on": _REGION_LAMBDA_ON, "regions": out}
 
     # ---------- 老 ----------
+    def _affect_fade_if_due(self, dt_seconds, now=None):
+        """一天跑一次评价印象褪色（V9.3）。失败不影响主循环。"""
+        try:
+            if float(dt_seconds) < 86400.0:
+                return 0
+            import impression_eval as _aff
+            return _aff.fade(self.db, now=now)
+        except Exception:
+            return 0
+
     def tick(self, dt_seconds, verbose=False):
         """时间流逝：结算权重 → 跨池流转 → 侵蚀 → 回收"""
         dt_raw = max(0.0, dt_seconds)
@@ -4285,6 +4310,12 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             _tl.Timeline(self.db)
         except Exception:
             pass
+        try:
+            # 2026-11-20 V9.3：评价印象层（affect 表）。
+            import impression_eval as _aff
+            _aff.ensure(self.db)
+        except Exception as _ae:
+            print("[card2] 评价印象建表失败: %s" % _ae)
 
     def inbox_pick(self, limit=40, hours=None, commit=False, min_score=None,
                    now=None):
@@ -7602,6 +7633,18 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             _itxt = "\n".join("- " + x for x in _ilines)
             out.append("【印象】\n" + _itxt)
             sections["impression"] = len(_itxt)
+
+        # ⑤.6b 态度（V9.3 评价印象）：我对这个人 / 这种场景是什么感觉。
+        #      只写主观感受，不预测行为、不当台词；WHALE_AFFECT=0 可关。
+        try:
+            if os.environ.get("WHALE_AFFECT", "1") != "0" and hasattr(self, "affect_hints"):
+                _alines = self.affect_hints(query or "", limit=3)
+                if _alines:
+                    _atxt = "\n".join("- " + x for x in _alines)
+                    out.append("【态度】\n" + _atxt)
+                    sections["affect"] = len(_atxt)
+        except Exception:
+            pass
 
         # ⑤.7 动机：此刻最想做的一两件事（欲望层）
         #     mot_state 里有七条驱力，candidates 会把超出基线的浮成「想做的事」。

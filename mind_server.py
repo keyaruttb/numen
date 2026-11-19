@@ -1617,6 +1617,67 @@ class Handler(BaseHTTPRequestHandler):
                             source=body.get("source") or "learn")
                         return self._send(200 if out.get("ok") else 400, out)
                 return self._fail(404, "no_learn_route", path)
+            if method == "GET" and path == "/affect":
+                # V9.3 评价印象列表（2026-11-20）
+                import impression_eval as _aff
+                try:
+                    qs = parse_qs(urlparse(self.path).query)
+                except Exception:
+                    qs = {}
+                kind = (qs.get("target_kind") or [""])[0] or None
+                tag = (qs.get("target_tag") or [""])[0] or None
+                try:
+                    limit = int((qs.get("limit") or ["20"])[0])
+                except Exception:
+                    limit = 20
+                with m.lock:
+                    if kind and tag:
+                        items = [_aff.read(m.card.db, kind, tag)]
+                        items = [x for x in items if x]
+                    else:
+                        items = _aff.snapshot(m.card.db, limit=limit)
+                return self._send(200, {"ok": True, "items": items,
+                                        "stats": _aff.stats(m.card.db)})
+            if method == "GET" and path == "/affect/snapshot":
+                import impression_eval as _aff
+                with m.lock:
+                    return self._send(200, {"ok": True, "items": _aff.snapshot(m.card.db),
+                                            "stats": _aff.stats(m.card.db)})
+            if method == "POST" and path == "/affect/attach":
+                # 把记忆挂进联想池（触景忆旧事）
+                import impression_eval as _aff
+                try:
+                    body = self._body()
+                except Exception as e:
+                    return self._fail(400, "bad_body", str(e)[:120])
+                kind = str(body.get("target_kind") or "scene")
+                tag = str(body.get("target_tag") or "").strip()
+                mid = body.get("mem_id")
+                if not tag or mid in (None, ""):
+                    return self._fail(400, "need_fields", "要 target_tag 和 mem_id")
+                with m.lock:
+                    ids = _aff.attach_mem(m.card.db, kind, tag, int(mid))
+                return self._send(200, {"ok": True, "target_kind": kind,
+                                        "target_tag": tag, "linked_mems": ids})
+            if method == "POST" and path == "/affect/feedback":
+                # 显式喂一条反馈（我们这边没有 feedback_loop，留这个入口）
+                import impression_eval as _aff
+                try:
+                    body = self._body()
+                except Exception as e:
+                    return self._fail(400, "bad_body", str(e)[:120])
+                kind = str(body.get("target_kind") or "scene")
+                tag = str(body.get("target_tag") or "").strip()
+                if not tag or body.get("r") is None:
+                    return self._fail(400, "need_fields", "要 target_tag 和 r")
+                with m.lock:
+                    row = _aff.update(m.card.db, kind, tag, float(body.get("r") or 0.0),
+                                      severity=float(body.get("severity") or 0.5),
+                                      mem_id=body.get("mem_id"),
+                                      note=str(body.get("note") or "")[:200])
+                if not row:
+                    return self._fail(400, "bad_r", "r 要在 -1..1")
+                return self._send(200, {"ok": True, "item": row})
             if method == "GET" and path == "/dream/pending":
                 # 梦境压缩（卡侧）：把还没消化的对话原文掏出来给外面的提炼器。
                 # 顺手带上死信：失败过的批次要让人看得见、能重试，不能静默烂在库里。
@@ -4165,6 +4226,22 @@ def _start_maintenance(mind):
                 except Exception as e:
                     print("[mind] 工作台清理失败: %s" % e)
                 last["worklog"] = now
+
+            # 0.5) 评价印象褪色（V9.3）：默认一天一次，向中性缓慢回归，不删除。
+            try:
+                _af_sec = float(os.environ.get("WHALE_AFFECT_FADE_SEC", "86400") or 0)
+            except Exception:
+                _af_sec = 86400.0
+            if _af_sec > 0 and now - float(last.get("affect", 0.0) or 0.0) >= _af_sec:
+                try:
+                    import impression_eval as _affe
+                    with mind.lock:
+                        _naf = _affe.fade(mind.card.db, now=now)
+                    if _naf:
+                        print("[mind] 评价印象褪色：%d 条" % _naf)
+                except Exception as e:
+                    print("[mind] 评价印象褪色失败: %s" % e)
+                last["affect"] = now
 
             # 0.8) 签名检查点（V7 第 5 件）：每小时给「走到哪儿了」盖一个带 HMAC
             #      的章。锚是明文 JSON、谁都能改小来掩盖回滚；检查点改一个字就

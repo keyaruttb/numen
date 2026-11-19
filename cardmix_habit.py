@@ -135,6 +135,119 @@ class MixHabit(object):
             print("[card2] 印象记账失败: %s" % _ie)
             return False
 
+    # ---- V9.3 评价印象（affect）门面，2026-11-20 ------------------------
+    def affect_match(self, target_kind=None, target_tag=None, min_salience=0.0):
+        try:
+            import impression_eval as aff
+            return aff.match(self.db, target_kind, target_tag, min_salience)
+        except Exception:
+            return None
+
+    def affect_read(self, target_kind, target_tag):
+        try:
+            import impression_eval as aff
+            return aff.read(self.db, target_kind, target_tag)
+        except Exception:
+            return None
+
+    def affect_attach(self, target_kind, target_tag, mem_id):
+        try:
+            import impression_eval as aff
+            return aff.attach_mem(self.db, target_kind, target_tag, mem_id)
+        except Exception:
+            return []
+
+    def affect_hints(self, query="", limit=3):
+        """【态度】段的取数：他（人物）常驻一条 + 和这句话沾边的场景。"""
+        try:
+            import impression_eval as aff
+        except Exception:
+            return []
+        lines = []
+        try:
+            uid = self._affect_uid()
+            r = aff.read(self.db, "person", str(uid))
+            if r and float(r["salience"]) >= 0.08:
+                lines += aff.hint_lines(self.db, "person", str(uid), limit=1)
+        except Exception:
+            pass
+        try:
+            for it in aff.snapshot(self.db, limit=20):
+                if it["target_kind"] != "scene":
+                    continue
+                tag = str(it["target_tag"] or "")
+                if float(it["salience"]) < 0.08:
+                    continue
+                if tag and (tag in (query or "") or (query or "") in tag):
+                    lines += aff.hint_lines(self.db, "scene", tag, limit=1)
+                if len(lines) >= int(limit):
+                    break
+        except Exception:
+            pass
+        if not lines:
+            try:
+                lines = aff.hint_lines(self.db, limit=min(2, int(limit)))
+            except Exception:
+                lines = []
+        out, seen = [], set()
+        for x in lines:
+            if x not in seen:
+                out.append(x)
+                seen.add(x)
+        return out[:int(limit)]
+
+    def affect_snapshot(self, limit=50):
+        try:
+            import impression_eval as aff
+            return aff.snapshot(self.db, limit=limit)
+        except Exception:
+            return []
+
+    def affect_nudge(self, hs, target_kind, target_tag, step=None):
+        try:
+            import impression_eval as aff
+            return aff.mood_nudge(self.db, hs, target_kind, target_tag, step=step)
+        except Exception:
+            return {}
+
+    def _affect_uid(self):
+        for attr in ("_affect_uid_cache", "about_uid", "_about_uid"):
+            v = getattr(self, attr, None)
+            if v:
+                return str(v)
+        try:
+            row = self.db.execute(
+                "SELECT about_uid FROM mem WHERE speaker='user' AND about_uid<>''"
+                " ORDER BY create_ts DESC LIMIT 1").fetchone()
+            if row and row[0]:
+                return str(row[0])
+        except Exception:
+            pass
+        return "user"
+
+    def _affect_learn(self, rpe, scenario="generic", uid=None, text=None):
+        """一句身体反应磨一次评价印象（人物 + 场景两个维度）。"""
+        try:
+            import impression_eval as aff
+        except Exception:
+            return 0
+        r = float(rpe or 0.0)
+        sev = min(1.0, abs(r))
+        n = 0
+        try:
+            aff.update(self.db, "person", str(uid or self._affect_uid()), r,
+                       severity=sev, note=str(scenario or "")[:40])
+            n += 1
+        except Exception:
+            pass
+        try:
+            aff.update(self.db, "scene", str(scenario or "generic"), r,
+                       severity=sev, note=(text or "")[:60])
+            n += 1
+        except Exception:
+            pass
+        return n
+
     def habit_hints(self, limit=5, max_chars=220):
         """从 habits 表捞几条稳定习惯，拼成短句给【我是谁】用。
 
