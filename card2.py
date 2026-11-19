@@ -885,6 +885,27 @@ REGION_BOOST = 1.25
 #     余弦主导时它们会把真正的证据挤下去；cover 主导更抗这种稀释。
 #   · bench（M01 417 题，有证据轮 305，虚拟时钟口径）两档基本打平：139/305=45.6% vs 140/305=45.9%。
 #   · 回退：改成 (0.35, 0.30, 0.20, 0.10) 并把 RECALL_NARROW_MAX 回 6、RECALL_CAP_MAX 回 12。
+def _brief_line(raw, limit=110):
+    """一条原文压成一行短句（给【联想】【学过的】这类独立部件用）。
+
+    只负责「别把整段原文塞进上下文」，不参与任何打分。
+    """
+    try:
+        s = re.sub(r"\s+", " ", str(raw or "")).strip()
+    except Exception:
+        return ""
+    s = s.strip(" -—·•　")
+    if len(s) > limit:
+        cut = s[:limit]
+        for sep in ("。", "，", "；", "！", "？"):
+            k = cut.rfind(sep)
+            if k >= limit // 3:
+                cut = cut[:k + 1]
+                break
+        s = cut
+    return s
+
+
 SCORE_W = (0.35, 0.30, 0.00, 0.00)
 
 # ---- V9 候选并集（2026-11-19）------------------------------------------
@@ -2007,6 +2028,10 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             events = viscera.guess(text, emotion)
             self.v = viscera.step(v, dt, events)
         self.v["ts"] = now
+        # 2026-11-20：记下「这句话刚戳到身体」的墙钟时间。
+        # mood_pad 靠它判断该读「身体这本快账」还是跟「四激素那本慢账」平均 ——
+        # 少了这个戳，被骂之后【此刻】还写着「心情不错」。
+        self._vt_ts = now
         self._save_viscera()
         self._hist_viscera(res, now)
         return self.v
@@ -2157,9 +2182,21 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                               h.get("h_cort"), h.get("h_oxy"))
         if pad_body is None:
             return pad_h
-        p = round(max(-1.0, min(1.0, 0.5 * (pad_body["p"] + pad_h["p"]))), 3)
-        a = round(max(-1.0, min(1.0, 0.5 * (pad_body["a"] + pad_h["a"]))), 3)
-        d = round(max(-1.0, min(1.0, 0.5 * (pad_body["d"] + pad_h["d"]))), 3)
+        # 2026-11-20：刚被某句话戳到的时候（180 秒内），读身体那本快账，
+        # 不跟四激素那本慢账平均 —— 慢了半拍就会「被骂完还是好心情」。
+        _fresh = False
+        try:
+            _fresh = (time.time() - float(getattr(self, "_vt_ts", 0.0))) < 180.0
+        except Exception:
+            _fresh = False
+        if _fresh:
+            p = round(max(-1.0, min(1.0, float(pad_body["p"]))), 3)
+            a = round(max(-1.0, min(1.0, float(pad_body["a"]))), 3)
+            d = round(max(-1.0, min(1.0, float(pad_body["d"]))), 3)
+        else:
+            p = round(max(-1.0, min(1.0, 0.5 * (pad_body["p"] + pad_h["p"]))), 3)
+            a = round(max(-1.0, min(1.0, 0.5 * (pad_body["a"] + pad_h["a"]))), 3)
+            d = round(max(-1.0, min(1.0, 0.5 * (pad_body["d"] + pad_h["d"]))), 3)
         return {"p": p, "a": a, "d": d, "label": padlib.pad_label(p, a),
                 "src": {"mood": round(mood, 3),
                         "sero": pad_h["src"]["sero"], "dopa": pad_h["src"]["dopa"],
@@ -6712,6 +6749,20 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             if h:
                 hint = hormone.style_hint(h)
         if hint:
+            # 2026-11-20：pad_style_hint 已经用「心情不错…」开头了，
+            #    再加一句「现在心情+…」就变成「现在心情心情不错」；
+            #    更糟的是心境字段（慢账）跟身体那句（快账）会互相打脸
+            #    （「心情不错」+「没什么劲、有点发怵」）。被戳到的 180 秒内只留一句。
+            _fresh = False
+            try:
+                _fresh = (time.time() - float(getattr(self, "_vt_ts", 0.0))) < 180.0
+            except Exception:
+                _fresh = False
+            if _fresh:
+                parts = [x for x in parts
+                         if not (x.startswith("现在心情") or x.startswith("心情"))]
+            elif parts and parts[0].startswith("现在心情") and "心情" in hint:
+                parts.pop(0)
             parts.append(hint)
         # 两小时内真被什么戳到过，就把它说出来 —— 比只念激素水平更像人
         ev = getattr(self, "_last_event", None)
@@ -6957,7 +7008,13 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         #    现在顺序是 稳 → 稳 → 变 → 变 → 变：前两格是缓存的地基，
         #    真正会动的都在尾巴上，命中就只从尾巴开始断。
         if identity:
-            blk = "【我是谁】\n" + take(identity, q["identity"])
+            # 2026-11-20：人格整段给，不再按 q["identity"] 截断。
+            #    他明确要求「组装时人格必须完整加载」——截人格等于每轮都在
+            #    「记得自己是谁」和「省 token」之间赌一把。WHALE_IDENTITY_FULL=0 回退。
+            if os.environ.get("WHALE_IDENTITY_FULL", "1") == "1":
+                blk = "【我是谁】\n" + identity
+            else:
+                blk = "【我是谁】\n" + take(identity, q["identity"])
             out.append(blk)
             sections["identity"] = len(blk)
         used = 0
@@ -7407,7 +7464,9 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         #    后者是熟练度 —— 会做的东西不该跟着记忆一起褪色。
         #    而且技能带步骤，混进印象格里会把那格撑爆。
         used = 0
-        cap5 = used + q["recall"]
+        # 2026-11-20：技能不占「四格预算」—— 会做的事是熟练度，不该因为
+        # 这一轮记忆格配额小就被截掉。给它独立的字数上限（WHALE_SKILL_CHARS）。
+        cap5 = used + max(200, int(os.environ.get("WHALE_SKILL_CHARS", "700") or 700))
         try:
             _skv = to_vec(query or "")
             _sk_hits = (self.skill.search(_skv, top_k=3,
@@ -7439,6 +7498,72 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         #    人格 + 长期两格就变成稳定的前缀，缓存能从第一格一直命到
         #    「想起」之前 —— 只有尾巴要重算。
         #    这句话本身很短（二三十字），重算它几乎不花钱。
+        # ⑤.4 独立部件：联想（顺带想起的）与学过的（region=study 的笔记）
+        #     2026-11-20 用户口径：「联想和回想起来的事应当作为组装时独立的部件，
+        #     需要调用 skill 或者学到的知识应当独立完整的加上去且不占用比例」。
+        #     所以这两格**不吃** q["recall"] 的额度，各自只有字数上限；
+        #     WHALE_SOLO=0 可以整体关掉。
+        if os.environ.get("WHALE_SOLO", "1") == "1":
+            _solo_cap = max(200, int(os.environ.get("WHALE_SOLO_CHARS", "900") or 900))
+            _shown = set(int(x) for x in (_picked_ids or []))
+            # ① 联想：recall 时突触顺带点亮的那些条，单独成格
+            try:
+                _al = [int(x) for x in (getattr(self, "_last_assoc_ids", set()) or set())
+                       if int(x) not in _shown][:6]
+            except Exception:
+                _al = []
+            if _al:
+                _alines = []
+                _au = 0
+                try:
+                    _ph = ",".join("?" * len(_al))
+                    for _r in self.db.execute(
+                            "SELECT id, raw, create_ts FROM mem WHERE id IN (%s)" % _ph, _al):
+                        _txt = _brief_line(_r["raw"], 110)
+                        if not _txt:
+                            continue
+                        if _au + len(_txt) > _solo_cap // 2:
+                            break
+                        _alines.append("- " + _txt)
+                        _au += len(_txt)
+                except Exception:
+                    _alines = []
+                if _alines:
+                    _ablk = "【联想】\n" + "\n".join(_alines)
+                    out.append(_ablk)
+                    sections["assoc"] = len(_ablk)
+            # ② 学过的：她真学过的东西（region=study），整段给，不按比例砍
+            try:
+                _st = self.recall(query, top_k=6, access=False, regions=["study"]) if query else []
+            except Exception:
+                _st = []
+            _slines = []
+            _su = 0
+            for _h in _st:
+                _mid = int(_h[2]["id"] or 0)
+                if _mid in _shown:
+                    continue
+                try:
+                    if str(_h[2]["region"] or "") != "study":
+                        continue
+                except Exception:
+                    continue
+                try:
+                    _raw2 = _h[2]["raw"]
+                except Exception:
+                    _raw2 = ""
+                _t = _brief_line(_raw2 or "", 160)
+                if not _t:
+                    continue
+                if _su + len(_t) > _solo_cap // 2:
+                    break
+                _slines.append("- " + _t)
+                _su += len(_t)
+            if _slines:
+                _sblk = "【学过的】\n" + "\n".join(_slines)
+                out.append(_sblk)
+                sections["study"] = len(_sblk)
+
         # ⑤.5 身体（快反应层）：一句话就能动的那一层。
         #     放在【此刻】前面 —— 生理反应比情绪先来，顺序本身也是信息。
         try:
@@ -7482,11 +7607,40 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     "sent_today": 0, "learned_today": 0,
                 })
                 if _cands:
-                    _top = _cands[0]
-                    _mtxt = motiv.describe(_top)
-                    if _mtxt:
-                        out.append("【动机】\n" + _mtxt)
+                    # 2026-11-20：欲望单独一格，列全部浮出基线的（最多 3 条），
+                    #    不吃四格预算 —— 它是「我这会儿想干什么」，不是记忆。
+                    _mlines = []
+                    for _c in _cands[:3]:
+                        _t = motiv.describe(_c)
+                        if _t and _t not in _mlines:
+                            _mlines.append("- " + _t)
+                    if _mlines:
+                        _mtxt = "\n".join(_mlines)
+                        out.append("【欲望】\n" + _mtxt)
                         sections["motiv"] = len(_mtxt)
+                    # 【期待】独立成格：认知层那本「预期」账（RPE 的另一半）
+                    try:
+                        _lk = self._emotion()
+                        _ex = {}
+                        if _lk is not None:
+                            _ex = dict(getattr(getattr(_lk, "eng", None), "expect", {}) or {})
+                        _nm = {"praise": "夸我一句", "comfort": "安慰我", "flirt": "跟我亲近",
+                               "apology": "跟我道歉", "reject": "拒绝我", "neglect": "冷落我",
+                               "tired": "说累", "jealous": "吃醋", "generic": "平常地聊"}
+                        _pk = sorted(_ex.items(), key=lambda kv: -float(kv[1]))[:2]
+                        _el = []
+                        for _k, _v in _pk:
+                            _v = float(_v)
+                            _w = "我大概预期你会%s" % _nm.get(_k, _k)
+                            if _v < 0.55:
+                                _w = "说不好你接下来会怎么着（近来的偏向：%s）" % _nm.get(_k, _k)
+                            _el.append("- " + _w + "（%.2f）" % _v)
+                        if _el:
+                            _etxt = "\n".join(_el)
+                            out.append("【期待】\n" + _etxt)
+                            sections["expect"] = len(_etxt)
+                    except Exception:
+                        pass
         except Exception:
             pass
 

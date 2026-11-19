@@ -698,12 +698,22 @@ class Mind(object):
             return _ctx, _hits
 
         if _ctx_unlock():
+            # 2026-11-20：先把「身体听到这句话的反应」放在组装之前。
+            # 原来的 defer 分支是「组装 → 再补内脏刺激」，于是 prompt 里的【此刻】
+            # 读的是上一句的情绪 —— 她被骂了，回话用的却是被骂之前的心情。
+            # 这里把这一记刺激挪到短锁里先写掉（只写一个 meta 行，很便宜），
+            # 读阶段照旧不拿锁；后面那笔记账传 touch=False，免得同一句打两遍。
+            with self.lock:
+                try:
+                    self.card.viscera_touch(str(message))
+                except Exception:
+                    pass
             # 读不拿锁：本线程自己的连接，只读不算账。
             with self.card.reading():
                 ctx, hits = _read(defer=True)
-            # 记账（召回事件/会话命中/突触/内脏）攒成一小笔，回短锁里一次写完。
+            # 记账（召回事件/会话命中/突触）攒成一小笔，回短锁里一次写完。
             with self.lock:
-                self.card.apply_recall_effects(hits, message)
+                self.card.apply_recall_effects(hits, message, touch=False)
                 self.card.flush_deferred_effects()
         else:
             with self.lock:
