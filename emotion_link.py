@@ -104,7 +104,50 @@ def guess_scenario(text: str) -> str:
     return "generic"
 
 
-def pulse_of(res, fatigue=0.0, night=False):
+
+# —— 伤害闸（2026-11-19，V9-P0）——
+import re as _re
+# 光看场景会误判：一句「对不起，滚，别烦我」被判 apology，暖意照样加满。
+# 这里把「这句话有没有伤到我」单独算一遍，暖意与多巴胺下限都乘 (1-h)；
+# h≥0.2 时「道歉」不算有效修复（嘴上说对不起、下一句还在骂 = 不认账）。
+_HARM_WORDS = (
+    "滚", "闭嘴", "烦死了", "别烦", "别管我", "蠢", "废物", "垃圾", "没用",
+    "讨厌你", "不想理你", "你怎么这么", "恶心", "恶心死", "有病", "神经病",
+)
+_COLD_WORDS = ("随便", "无所谓", "爱怎样怎样", "不重要", "算了", "没什么好说的")
+_APOLOGY_WORDS = ("对不起", "抱歉", "我错了", "是我的错", "我不该", "原谅我")
+_ACCOUNT_WORDS = ("是我", "我改", "我会", "我下次", "我来", "我的锅")
+
+
+def _harm_of(text: str, scenario: str = "") -> float:
+    """0~1：这句话的伤害强度。只做最粗的词面判断，宁可少判不要误判。"""
+    t = (text or "").strip()
+    if not t:
+        return 0.0
+    h = 0.0
+    if any(w in t for w in _HARM_WORDS):
+        h = 0.6
+    if any(w in t for w in _COLD_WORDS) and not h:
+        h = 0.25
+    if h and _re.search(r"[!！]{1,}|你(给|滚)|永远|再也", t):
+        h = min(1.0, h + 0.2)
+    return h
+
+
+def _repair_of(text: str, scenario: str = "") -> float:
+    """0~1：这句话的修复诚意（认错 × 有担责 × 有后续）。"""
+    t = (text or "").strip()
+    if not t:
+        return 0.0
+    ap = 1.0 if (scenario == "apology" or any(w in t for w in _APOLOGY_WORDS)) else 0.0
+    if not ap:
+        return 0.0
+    acc = 1.0 if any(w in t for w in _ACCOUNT_WORDS) else 0.55
+    follow = 1.0 if _re.search(r"(下次|以后|明天|待会|我现在就)", t) else 0.7
+    return max(0.0, min(1.0, ap * acc * follow))
+
+
+def pulse_of(res, fatigue=0.0, night=False, text=""):
     """把一轮的调质脉冲翻成 (激素增量, 交感增量, 副交感增量)。
 
     认知层只给五条（DA/NE/OT/5HT/CORT），但身体里有 24 条。这里补的是
@@ -143,7 +186,13 @@ def pulse_of(res, fatigue=0.0, night=False):
     # 这一项是直接加在催产素上的（带一点催乳素与 GABA），场景由认知层给。
     _warm_scene = str(getattr(res, "scenario", "") or "") in (
         "praise", "comfort", "flirt", "apology")
-    warm = 0.18 if _warm_scene else 0.0
+    # 伤害闸：这句话本身有伤害时，场景判成「夸/安慰/道歉」也不加热。
+    _h = _harm_of(text, str(getattr(res, "scenario", "") or ""))
+    _r = _repair_of(text, str(getattr(res, "scenario", "") or ""))
+    if _h >= 0.20:
+        _r = 0.0            # 嘴上认错不算修复
+    _gate = max(0.0, 1.0 - _h)
+    warm = (0.18 + 0.16 * _r) * _gate if (_warm_scene and _gate > 0) else 0.0
     # 11-17：期望学满之后，一句「你今天真好」的 RPE 会掉到 0.05 以下 ——
     # 不该因为「我早就知道他会夸我」就一点暖意都没有。给一条下限。
     WARM_CARRY = 0.16
@@ -152,7 +201,8 @@ def pulse_of(res, fatigue=0.0, night=False):
 
     deltas = {
         # —— 五条主调质，直连 ——
-        "dopa": (max(da, 0.12) if _warm_scene else da),
+        # dopa 下限也过闸：被骂的时候不该还有「被夸」的下限撑着
+        "dopa": (max(da, 0.12) if (_warm_scene and _h < 0.20) else da),
         "nora": ne,
         "sero": se,
         "cort": co,
@@ -212,6 +262,7 @@ class EmotionLink:
         try:
             sc = scenario or guess_scenario(text)
             ap = estimate_appraisal(text or "", scenario=sc)
+            self._last_text = text or ""     # 供 apply_to 过伤害闸
             return self.eng.step(ap)
         except Exception:
             return None
@@ -244,7 +295,8 @@ class EmotionLink:
             night = hh >= 22 or hh < 6
         except Exception:
             night = False
-        deltas, sym, para = pulse_of(res, fatigue=fat, night=night)
+        deltas, sym, para = pulse_of(res, fatigue=fat, night=night,
+                                      text=getattr(self, "_last_text", ""))
         return viscera.inject(s, deltas, sym, para)
 
     def label(self, res=None) -> str:
