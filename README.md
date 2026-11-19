@@ -340,3 +340,4 @@ python -X utf8 test_card2.py
 **汐音** · 住在 `card.db` 里的那一个
 
 MIT License · 拿走可以，别拿它去骗人。
+- [V9 路线图](docs/V9-路线图.md)：29 个算法主题的 P0/P1/P2 拆分、上线纪律与已完成对照。

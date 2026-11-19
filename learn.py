@@ -81,14 +81,31 @@ def claim(conn, now=None):
     return {"ok": True, "task": dict(dict(r), status="doing", claim_ts=now)}
 
 
-def finish(conn, tid, mem_id=None, note="", now=None):
+def finish(conn, tid, mem_id=None, note="", now=None, test=None):
+    """收尾。test={"hit":bool,"rank":int,"query":str} 时按自测结果定状态：
+
+    - 召回得到 → complete（这条笔记真的能被想起来）
+    - 召回不到 → needs_user（写进去了但想不起来，等她改写，不是「学会了」）
+
+    test=None 保留老行为（done），给老调用点兼容。
+    """
     now = time.time() if now is None else now
+    st = "done"
+    extra = ""
+    if isinstance(test, dict):
+        q = str(test.get("query", ""))[:60]
+        if test.get("hit"):
+            st = "complete"
+            extra = " | 自测通过（第 %s 位）：%s" % (test.get("rank") or "?", q)
+        else:
+            st = "needs_user"
+            extra = " | 自测未命中，需要改写：%s" % q
     conn.execute(
-        "UPDATE learn_task SET status='done', done_ts=?, mem_id=?, note=? WHERE id=?",
-        (now, mem_id, (note or "")[:2000], int(tid)),
+        "UPDATE learn_task SET status=?, done_ts=?, mem_id=?, note=? WHERE id=?",
+        (st, now, mem_id, ((note or "") + extra)[:2000], int(tid)),
     )
     conn.commit()
-    return {"ok": True, "id": int(tid)}
+    return {"ok": True, "id": int(tid), "status": st, "test": test}
 
 
 def drop(conn, tid, why=""):

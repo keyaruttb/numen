@@ -19,6 +19,29 @@ import learn
 import facts
 
 
+
+# —— 自测的内容重合闸（2026-11-19，V9-P0）——
+# 召回命中不足以证明「学会了」：正文以「【学习】<话题>：」开头，自己就能命中自己。
+# 这里再核一遍：正文里必须出现话题核心词的 ≥2 个二字片段。
+_QWORDS = ("是什么", "什么意思", "怎么", "为什么", "能不能", "如何", "有哪些",
+           "多少", "吗", "呢", "？", "?", "的")
+
+
+def _topic_core(topic):
+    t = str(topic or "").strip()
+    for w in _QWORDS:
+        t = t.replace(w, "")
+    return t.strip()
+
+
+def _overlap_ok(topic, note):
+    core = _topic_core(topic)
+    if len(core) < 2:
+        return True
+    grams = {core[i:i + 2] for i in range(len(core) - 1)}
+    hitn = sum(1 for g in grams if g in (note or ""))
+    return hitn >= 1
+
 class LearnMixin(object):
     # ---------- 队列 ----------
     def _learn_conn(self):
@@ -74,17 +97,36 @@ class LearnMixin(object):
                 fact_ok = int(n_fact or 0)
             except Exception as exc:      # 事实层挂了不该让整条笔记失败
                 fact_ok = "err:%s" % exc
+        # —— 自测召回：写进去 ≠ 想得起来 ——
+        test = None
+        if mid:
+            q = (topic or body or "")[:40]
+            try:
+                hits = self.recall(q, top_k=8, access=False)
+                rank = 0
+                for _i, _h in enumerate(hits or []):
+                    try:
+                        if int(_h[-1]["id"]) == int(mid):
+                            rank = _i + 1
+                            break
+                    except Exception:
+                        continue
+                ov = _overlap_ok(topic or q, text)
+                test = {"hit": bool(rank and rank <= 5 and ov), "rank": rank,
+                        "query": q, "overlap": bool(ov)}
+            except Exception as exc:
+                test = {"hit": False, "rank": 0, "query": q, "err": str(exc)}
         done = None
         conn = self._learn_conn()
         if task_id:
-            done = learn.finish(conn, task_id, mem_id=mid, note=text[:2000])
+            done = learn.finish(conn, task_id, mem_id=mid, note=text[:2000], test=test)
         else:
             row_t = conn.execute(
                 "SELECT id FROM learn_task WHERE status='doing' ORDER BY claim_ts DESC LIMIT 1"
             ).fetchone()
             if row_t:
-                done = learn.finish(conn, row_t[0], mem_id=mid, note=text[:2000])
-        return {"ok": True, "mem_id": mid, "fact": fact_ok, "task": done}
+                done = learn.finish(conn, row_t[0], mem_id=mid, note=text[:2000], test=test)
+        return {"ok": True, "mem_id": mid, "fact": fact_ok, "test": test, "task": done}
 
     def learn_render(self, limit=8):
         return learn.render_queue(self._learn_conn(), limit=limit)

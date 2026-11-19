@@ -875,19 +875,17 @@ REGION_BOOST = 1.25
 # 默认值来自 10-30 在 20 条真实查询上的网格搜索；10-31 修好候选集/分区/BLAS 后
 # 由 eval_weights.py 重新扫描一遍确认（见那个脚本开头的说明）。
 #
-# 🔴 2026-11-17（用户 m01113「确定优化就融合到真卡」）：改成 (1.00, 0.30, 0, 0)。
-#    两头都测过，不是拍脑袋：
-#    · 真卡尺子（tools/eval/cases.json 23 条，R@1 / R@3 / EVID）：
-#        base (0.35,.30,.20,.10) = 62.5 / 75.0 / 66.7
-#        这一版 (1.00,.30,0,0)   = 62.5 / 75.0 / 100.0（evid 三条全中，13 号也捞回来了）
-#        纯余弦 (1,0,0,0)        = 37.5 / 50.0 / 33.3 —— 真卡上会明显退步，所以 cover 必须留。
-#    · bench（M01 417 题，全量 / 有证据轮 305）：base = 3.8 / 5.2；
-#        这一版 = 34.1 / 46.6（纯余弦 31.9 / 43.6，块检索 34.3 / 46.9）。
-#    → wn（清晰度）和新近（recency）在两个尺子上都是噪声：去掉它们 EVID 66.7→100、
-#      bench 也从 31.9 抬到 34.1；留着只会把真命中的记忆往后压。
-#    注意和不再是 1（1.30）：乘子是乘在总分上的，整体等比缩放不改变顺序，所以不必归一。
-#    回退：把下面这行改回 (0.35, 0.30, 0.20, 0.10)，并把 RECALL_NARROW_MAX 改回 6、RECALL_CAP_MAX 改回 12。
-SCORE_W = (1.00, 0.30, 0.00, 0.00)
+# 打分权重（2026-11-19 定稿）。四段依次是：语义融合分 / 实词覆盖率 / 清晰度 / 新近。
+#   · 清晰度(wn) 与新近(recency) 一律归零：两把尺子上它们都是噪声，留着只会把真命中的记忆往后压。
+#   · 语义与覆盖的比例 0.35 : 0.30（不是 1.00 : 0.30）—— 2026-11-19 复查时把权重拉到纯余弦侧
+#     (1.00, .30, 0, 0) 在「刷新过的真卡快照」上退步了：
+#        (1.00,.30,0,0)  R@1 50.0 / R@3 75.0 / EVID 66.7
+#        (0.35,.30,0,0)  R@1 62.5 / R@3 75.0 / EVID 100.0   ← 现在用的
+#     原因很直白：卡里越往后越会有「说法相近的记忆」（梦境摘要、学习笔记），
+#     余弦主导时它们会把真正的证据挤下去；cover 主导更抗这种稀释。
+#   · bench（M01 417 题，有证据轮 305，虚拟时钟口径）两档基本打平：139/305=45.6% vs 140/305=45.9%。
+#   · 回退：改成 (0.35, 0.30, 0.20, 0.10) 并把 RECALL_NARROW_MAX 回 6、RECALL_CAP_MAX 回 12。
+SCORE_W = (0.35, 0.30, 0.00, 0.00)
 
 # ---- V9 候选并集（2026-11-19）------------------------------------------
 # 417 题实测（bench，只读副本）：单通道语义 50.2% / 分块 46.9% / 字面 39.3%，
@@ -897,6 +895,12 @@ SCORE_W = (1.00, 0.30, 0.00, 0.00)
 # 默认关：WHALE_UNION=1 打开；WHALE_UNION_K 融合常数（默认 60）；
 # WHALE_UNION_W 四通道权重（默认 0.40/0.30/0.20/0.10）。
 _UNION_ON = os.environ.get("WHALE_UNION", "0") == "1"
+# 渲染去重（实验臂）：近似重复的记忆只留第一条，别把 13 个格子占光。
+_DEDUP_ON = os.environ.get("WHALE_DEDUP", "0") == "1"
+try:
+    _DEDUP_TH = float(os.environ.get("WHALE_DEDUP_TH", "0.82") or 0.82)
+except Exception:
+    _DEDUP_TH = 0.82
 _UNION_K = float(os.environ.get("WHALE_UNION_K", "60") or 60)
 try:
     _UNION_W = tuple(float(x) for x in
@@ -7201,6 +7205,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 print("   %.3f id=%s %s" % (float(_h[0]) or 0.0, dict(_h[2]).get("id"),
                                             (dict(_h[2]).get("raw") or "")[:40]))
 
+        _seen_dd = []      # 已经占过格子的原文（去重用）
         for s, wn, r in fresh:
             # 🔧 T4-4：联想来的条目加个前缀，跟直接想起区分开。
             #    直接命中最多 5 条，联想最多再补 2 条，别把格子塞满。
@@ -7222,6 +7227,16 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 n_assoc += 1
                 body = "（顺带想起）" + self.render(r, wn, query=query)
             else:
+                # 去重：这条是不是跟前面某条几乎一个意思？（jaccard 大于阈值就跳过）
+                if _DEDUP_ON:
+                    try:
+                        _rd = (r["raw"] or "").strip()
+                    except Exception:
+                        _rd = ""
+                    if _rd:
+                        if any(jaccard(_rd, _x) >= _DEDUP_TH for _x in _seen_dd):
+                            continue
+                        _seen_dd.append(_rd)
                 n_direct += 1
                 if n_direct > _max_lines:
                     break
