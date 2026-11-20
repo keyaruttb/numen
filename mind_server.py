@@ -332,7 +332,7 @@ GATE_WRITE_POST = frozenset((
     "/narrative/write",   # 写我自己那一段叙事
     "/feedback", "/review/run", "/review/confirm",   # V9.0 反馈环
     "/act",   # V9.4 立刻把意向做掉一次,
-    "/speech_policy/update",
+    "/gov/decide", "/speech_policy/update",
     "/speech_policy",
 ))
 
@@ -1838,6 +1838,35 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, {"ok": True, "item": out,
                                             "snapshot": _sp.snapshot(m.card.db)})
                 return self._send(405, {"ok": False, "error": "method_not_allowed"})
+            if path.startswith("/gov"):
+                import governance as _gv
+                if method == "GET" and path == "/gov/log":
+                    with m.lock:
+                        items = _gv.log(m.card.db, limit=30)
+                    self._send(200, {"ok": True, "items": items,
+                                     "decisions": list(_gv.DECISIONS)})
+                    return
+                if method == "GET" and path == "/gov/stats":
+                    with m.lock:
+                        st = _gv.stats(m.card.db)
+                    self._send(200, {"ok": True, "stats": st})
+                    return
+                if method == "POST" and path == "/gov/decide":
+                    body = self._body()
+                    try:
+                        with m.lock:
+                            d = _gv.decide(m.card.db,
+                                           body.get("subject_kind") or "mem",
+                                           int(body.get("subject_id") or 0),
+                                           str(body.get("action") or ""),
+                                           reason=str(body.get("reason") or ""),
+                                           source=str(body.get("source") or "manual"),
+                                           conflicts=int(body.get("conflicts") or 0))
+                    except Exception as e:
+                        self._send(400, {"ok": False, "error": str(e)})
+                        return
+                    self._send(200, d)
+                    return
             if path in ("/retention", "/retention/set"):
                 import card2 as _c2
                 if method == "GET":
@@ -1851,7 +1880,7 @@ class Handler(BaseHTTPRequestHandler):
                                      "ephemeral": _c2.TIER_EPHEMERAL,
                                      "flash_ttl_h": round(_c2.FLASH_TTL / 3600.0, 1)})
                     return
-                body = self._json_body()
+                body = self._body()
                 mid = int(body.get("mid") or 0)
                 tier = str(body.get("tier") or "").strip()
                 if not mid or not tier:

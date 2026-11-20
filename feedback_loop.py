@@ -756,6 +756,13 @@ class FeedbackLoop(object):
             if hit is not None:
                 continue
             try:
+                try:
+                    import governance as _gv3
+                    _gv3.decide(self.card.db, "fact", int(mid), "supersede",
+                                reason="旧说法被新事实推翻", source="reconcile",
+                                conflicts=1)
+                except Exception:
+                    pass
                 self.implicit(kind="decision", mem_id=mid, level="disconfirm",
                               note="旧说法被新事实推翻", source="fact_superseded",
                               now=now)

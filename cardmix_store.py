@@ -236,6 +236,14 @@ class MixStore:
                                " WHERE parent_id=?", (_g * 0.8, dup_id))
                     self.db.commit()
                     self._save_oxy()      # 去重路径也要落盘
+                    # V9.7.2：这条算「更新既有」，不是「新收一条」——记一笔治理判定。
+                    try:
+                        import governance as _gv2
+                        _gv2.decide(self.db, 'mem', dup_id, 'update',
+                                    reason='近重复（%.2f），抬老条目' % (1.0 if _exact_id is not None else best),
+                                    source='write', conflicts=0)
+                    except Exception as _ge:
+                        soft_fail('gov_decide_dedupe', _ge, '治理台账没记上')
                     return dup_id
         except Exception as e:
             # 去重路径挂了不该拖垮「记一条新的」，但必须留痕：

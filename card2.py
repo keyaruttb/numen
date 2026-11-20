@@ -4366,6 +4366,12 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             _sp3.ensure(self.db)
         except Exception:
             pass
+        try:
+            # 2026-11-20 V9.7.2：治理判定台账（gov_decision）。
+            import governance as _gv
+            _gv.ensure(self.db)
+        except Exception:
+            pass
 
     def inbox_pick(self, limit=40, hours=None, commit=False, min_score=None,
                    now=None):
