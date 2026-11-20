@@ -3117,6 +3117,61 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                         "age_h": round((time.time() - float(r["updated_ts"] or 0)) / 3600.0, 1)})
         return out
 
+    def _dream_regress_sample(self, limit=3):
+        """抽几条老记忆当回归样本：压完它们还得能在前 5 里找回来。"""
+        import re as _re
+        out = []
+        try:
+            rows = self.db.execute(
+                "SELECT id, raw FROM mem WHERE length(raw)>=14 AND tier NOT IN"
+                " ('core','core_mut') AND dead=0 ORDER BY RANDOM() LIMIT ?",
+                (int(limit),)).fetchall()
+        except Exception:
+            return out
+        for r in rows:
+            raw = str(r["raw"] or "")
+            q = None
+            for tok in _re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{6,12}", raw):
+                if len(tok) >= 8:
+                    q = tok
+                    break
+            out.append((int(r["id"]), q or raw[:12]))
+        return out
+
+    def _dream_regress_check(self, sample, top_k=5):
+        """返回（命中数，丢掉的样本）。"""
+        hit, lost = 0, []
+        for mid, q in sample:
+            try:
+                hits = self.recall(q, top_k=top_k, access=False)
+            except Exception:
+                hits = []
+            got = [int(h[2]["id"]) for h in hits] if hits else []
+            if int(mid) in got:
+                hit += 1
+            else:
+                lost.append((int(mid), q))
+        return hit, lost
+
+    def _dream_rollback(self, mids):
+        """把刚写的摘要撤干净：正文、出生证、分块。"""
+        ids = [int(m) for m in (mids or [])]
+        if not ids:
+            return 0
+        q = ",".join("?" for _ in ids)
+        for sql in ("DELETE FROM mem WHERE id IN (%s)" % q,
+                    "DELETE FROM mem_birth WHERE mid IN (%s)" % q,
+                    "DELETE FROM chunk WHERE mem_id IN (%s)" % q):
+            try:
+                self.db.execute(sql, tuple(ids))
+            except Exception:
+                pass
+        try:
+            self.db.commit()
+        except Exception:
+            pass
+        return len(ids)
+
     def dream_commit(self, items, dialogue_ids=None, speaker="self", key=None, force=False):
         """五阶段提交：ingest → summarize → link → validate → commit。
 
@@ -3189,6 +3244,8 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         except Exception as e:
             soft_fail("dream_batch", e, "梦批次登记失败（仍继续写，只是丢了幂等）")
 
+        _reg_sample = self._dream_regress_sample(3)
+        _reg_base_hit = self._dream_regress_check(_reg_sample)[0] if _reg_sample else 0
         written = []
         try:
             # ---- summarize + link ----
@@ -3221,6 +3278,20 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     problems.append("lost_after_write:%s" % mid)
             written = keep
 
+            # ---- regress：压完不能让「本来想得起来的」想不起来 ----
+            # 为什么用老记忆当尺子：拿摘要自己造问句必然命中（自己和自己最像），
+            # 那种检查永远通过、等于没查。真风险是新增一堆摘要后把老条目从前 5 挤掉。
+            _chal = []
+            _chal_hit = _reg_base_hit
+            if _reg_sample and _reg_base_hit:
+                _after_hit, _lost = self._dream_regress_check(_reg_sample)
+                _chal_hit = _after_hit
+                if _after_hit < _reg_base_hit:
+                    _chal = [_q for _m, _q in _lost][:3]
+                    self._dream_rollback(written)
+                    raise RuntimeError("regress_failed:%d->%d %s"
+                                       % (_reg_base_hit, _after_hit, _chal))
+
             # ---- commit：翻原文标记 + 落批次账 ----
             if dialogue_ids is None:
                 self.db.execute("UPDATE dialogue SET dreamed=1 WHERE dreamed=0")
@@ -3236,7 +3307,8 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             self._invalidate_idf()
             return {"ok": True, "key": key, "written": written, "n": len(written),
                     "n_written": len(written), "stage": "commit",
-                    "problems": problems, "dialogue_ids": ids}
+                    "problems": problems, "dialogue_ids": ids,
+                    "regress": {"sample": len(_reg_sample), "hit": _chal_hit}}
         except Exception as e:
             # ---- 死信：记下来，原文**不翻标记**（下次还能再压）----
             try:
