@@ -336,6 +336,56 @@ class FeedbackLoop(object):
                 "mem_id": row["mem_id"], "dialogue_id": row["dialogue_id"],
                 "steps": steps}
 
+    # ---------- 反应结算：他说的话就是对我上一句的评价 ----------
+    # 为什么要这条：self_utterance 登记了却没人给分，三天后只会被 drop_stale 收掉，
+    # 等于「我答应过什么」永远不进账。这里用他下一句的温度来结上一句 —— 轻、可回退。
+    _POS2 = ("谢谢", "辛苦", "厉害", "棒", "真好", "爱你", "对的", "没错", "可以", "好用",
+             "有道理", "不错", "优秀", "加油", "乖", "喜欢")
+    _NEG2 = ("不对", "错了", "不是", "没用", "别", "闭嘴", "讨厌", "笨", "蠢", "废物",
+             "干嘛", "烦", "算了", "胡说", "瞎", "垃圾")
+    _CORR = ("应该", "改成", "重来", "修正", "纠正", "其实", "但是", "可是", "然而",
+             "不过", "还是", "不对吧")
+
+    def _reaction_of(self, text):
+        """把一句话读成一组信号。宁可保守：读不出来就不结，别硬给分。"""
+        t = str(text or "")
+        if not t.strip():
+            return None
+        pos = sum(1 for w in self._POS2 if w in t)
+        neg = sum(1 for w in self._NEG2 if w in t)
+        corr = sum(1 for w in self._CORR if w in t)
+        q = t.count("?") + t.count("？")
+        if neg and neg >= pos:
+            return {"reject": min(0.9, 0.45 + 0.15 * neg), "label": "反感"}
+        if corr >= 2 and not pos:
+            return {"correction": min(0.9, 0.40 + 0.12 * corr), "label": "纠正"}
+        if pos >= 1 and not neg:
+            return {"approval": min(0.9, 0.35 + 0.18 * pos), "label": "认可"}
+        if q >= 2:
+            return {"correction": 0.25, "label": "追问"}
+        return None
+
+    def settle_from_reaction(self, text, now=None):
+        """拿他的下一句话，给最近一条还 open 的「我说的话」结算。"""
+        try:
+            sig = self._reaction_of(text)
+            if not sig:
+                return {"settled": False, "why": "no_signal"}
+            row = self.db.execute(
+                "SELECT id FROM feedback WHERE kind='self_utterance' AND status='open'"
+                " ORDER BY ts_action DESC, id DESC LIMIT 1").fetchone()
+            if not row:
+                return {"settled": False, "why": "no_open"}
+            fb_id = int(row["id"])
+            note = "反应：%s（%s）" % (sig.get("label"), str(text)[:24])
+            args = {k: v for k, v in sig.items() if k in
+                    ("approval", "correction", "reject")}
+            out = self.settle(fb_id, note=note, trust_ok=True, now=now, **args)
+            return {"settled": True, "fb_id": fb_id, "label": sig.get("label"),
+                    "r": (out or {}).get("r"), "bucket": (out or {}).get("bucket")}
+        except Exception as e:
+            return {"settled": False, "why": "%s: %s" % (type(e).__name__, e)}
+
     def implicit(self, kind="decision", mem_id=None, level="confirm", note="",
                  source="implicit", reuse=0.0, trust_ok=True, severity=None,
                  now=None):

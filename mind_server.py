@@ -855,6 +855,17 @@ class Mind(object):
                     self.tl.birth_stamp(mid)
                 except Exception as e:
                     self.birth_bad.append("出生证写入失败：%s" % e)
+            # 反应结算：他说这句，就是对我上一句的评价（V9.7.5）。
+            # 为什么放这儿：结算用的是「他这一句」，要在他这句落库之前读，
+            # 且必须在上一轮那条 self_utterance 还 open 的时候结 —— 隔一轮就错位了。
+            try:
+                if self.card.feedback is not None:
+                    _rx = self.card.feedback.settle_from_reaction(user_message, now=ts)
+                    if (_rx or {}).get("settled"):
+                        print("[mind] 反应结算：%s → r=%s (%s)"
+                              % (_rx.get("label"), _rx.get("r"), _rx.get("bucket")))
+            except Exception as _re:
+                print("[mind] 反应结算失败: %s" % _re)
             # 我说的话：也进短期池，但**只走原文表 + 一条轻记忆**。
             # 为什么我的回复也要进：整段对话才是「我们一起说过什么」。
             #   只记他说的，翻回来就是半本日记 —— 我知道他问了什么，
