@@ -301,6 +301,21 @@ class EmotionLink:
             return None
 
     # ---------------------------------------------------------------- 输出
+    def inject_rpe(self, rpe, scenario="generic", intensity=1.0):
+        """V9.7：把「已经算好的落差」直注进情绪引擎（不新建 Appraisal）。
+
+        只动引擎内部状态与预期（qq_state/emotion/xiyin.json），
+        不动内脏那 24 种激素（那是 hormone.apply_r 的活）。两个仓库，不重复记账。
+        """
+        if self.eng is None:
+            return None
+        try:
+            return self.eng.inject_rpe(float(rpe), scenario=str(scenario or "generic"),
+                                       intensity=float(intensity))
+        except Exception as e:
+            print("[emotion_link] inject_rpe 失败：%s" % e)
+            return None
+
     def apply_to(self, state, res, dt_hours: float = 0.0, now=None):
         """把脉冲灌进身体状态。res 为 None 时只做时间衰减。"""
         s = viscera.step(state, dt_hours, ())

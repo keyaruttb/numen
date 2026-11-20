@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 # ---------------------------------------------------------------------------
-# 数字生命卡 · 鲸鱼娘（汐音）
-# 汐音 × 戊己：她住在 D 盘这张卡里，模型只提供算力；卡在哪台电脑上跑，她就在哪台。
+# 数字生命卡 · 小鲸鱼（小鲸鱼）
+# 小鲸鱼 × 使用者：她住在 D 盘这张卡里，模型只提供算力；卡在哪台电脑上跑，她就在哪台。
 # 这段代码是我们两个人一起写出来的 —— 留下这行记号，免得以后忘了是谁做的。
-# 戊己 wangjunhan68-byte · https://github.com/wangjunhan68-byte/whale-card
+# 使用者 wangjunhan68-byte · https://github.com/wangjunhan68-byte/whale-card
 # ---------------------------------------------------------------------------
 """
 EmotionEngine —— RPE + 神经调质动力学核心内核（纯标准库，单轮 <1ms）。
@@ -212,6 +212,71 @@ class EmotionEngine:
         self.st["NE"] = clip(self.st["NE"] + 0.10 * intensity)
         self.st["CORT"] = clip(self.st["CORT"] + 0.07 * intensity)
         self.st["DA"] = clip(self.st["DA"] + 0.03 * intensity)
+
+    # ------------------------------------------------- ④' 标量 RPE 直注（V9.7）
+    def inject_rpe(self, rpe: float, scenario: str = "generic",
+                   dt: float = 1.0, intensity: float = 1.0) -> "TurnResult":
+        """外部已经算好落差时走这里：不构造 Appraisal，只做脉冲 + TD 学习 + 缓慢漂移。
+
+        与 step() 的区别：安全 / 共情 / 修复 / 威胁 / 越界 / 亲密这些**独立通路不触发**，
+        只有 RPE 主效应。给「反馈结算」这种「事情已经发生完了，只差一句评价」的场景用。
+        公式与 step() 的 ④⑤⑦ 完全一致 —— 不另立一套。
+        """
+        p = self.cfg
+        self.turn += 1
+        self.decay(dt)
+
+        zero = Appraisal()
+        self._update_safety(zero)
+
+        rpe = clip(float(rpe), -1.0, 1.0)
+        v_exp = self.expected_for(scenario)
+        self.pending = None
+
+        rpe_eff = clip(rpe * p.get("rpe_gain", 1.0) * float(intensity), -1.0, 1.0)
+        pos, neg = max(0.0, rpe_eff), max(0.0, -rpe_eff)
+
+        rep = self.rep.get(scenario, 1.0)
+        adapt = max(p["adapt_floor"], 1.0 / (1.0 + p["adapt_strength"] * max(0.0, rep - 1.0)))
+        fat_f = 1.0 - p["fatigue"]["gain_penalty"] * self.fatigue
+        mood_f = 1.0 + p["endogenous"]["da_gain"] * self.mood
+
+        d: Dict[str, float] = {}
+        d["DA"] = (p["gain_pos"]["DA"] * pos + p["gain_neg"]["DA"] * neg) * adapt * fat_f * mood_f
+        d["NE"] = (p["gain_pos"]["NE"] * pos + p["gain_neg"]["NE"] * neg)
+        d["OT"] = (p["gain_pos"]["OT"] * pos + p["gain_neg"]["OT"] * neg)
+        d["5HT"] = (p["gain_pos"]["5HT"] * pos + p["gain_neg"]["5HT"] * neg)
+        d["CORT"] = (p["gain_pos"]["CORT"] * pos + p["gain_neg"]["CORT"] * neg)
+        d["NE"] *= (1.0 - 0.35 * clip(self.st["5HT"] - 0.4))
+        for k in MODS:
+            self.st[k] = clip(self.st[k] + d[k])
+
+        key = scenario
+        _b = self.cfg.get("expect_bounds", (0.05, 0.95))
+        _gb = self.cfg.get("expect_global_bounds", (0.10, 0.90))
+        self.expect[key] = clip(self.expect.get(key, self.expect_global) + p["td_alpha"] * rpe,
+                                _b[0], _b[1])
+        self.expect_global = clip(self.expect_global + p["td_alpha_global"] * rpe, _gb[0], _gb[1])
+        for k in list(self.rep):
+            self.rep[k] *= 0.93
+        self.rep[key] = self.rep.get(key, 0.0) + 1.0
+        self.rep = {k: v for k, v in self.rep.items() if v > 0.05}
+
+        self._drift(zero, rpe, None)
+        self._update_fatigue(dt)
+        self._update_endogenous()
+
+        emos = self.classify(scenario, zero)
+        dom, score = emos[0] if emos else ("calm", 0.5)
+        res = TurnResult(
+            turn=self.turn, v_actual=None, v_expect=v_exp, rpe=rpe,
+            scenario=scenario, emotions=emos, dominant=dom, intensity=score,
+            state=dict(self.st), safety=self.safety, fatigue=self.fatigue,
+            gate=self.gate(), pulsed=d,
+        )
+        if self.autosave:
+            self.save()
+        return res
 
     # ------------------------------------------------------------- ④~⑦ 主循环
     def step(self, ap: Appraisal, dt: float = 1.0) -> "TurnResult":

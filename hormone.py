@@ -377,5 +377,10 @@ def apply_r(hs, r, scale=0.22, severity=0.0):
              "h_dopa": -0.7 * w, "h_oxy": -0.3 * w}
     for k, mul in g.items():
         if k in h:
-            h[k] = _clamp(float(h[k]) + amp * abs(mul) * (1 if mul > 0 else -1), 0.0, 1.0)
+            cur = _clamp(float(h[k]), 0.0, 1.0)
+            step = amp * abs(mul) * (1 if mul > 0 else -1)
+            # 2026-11-20（用户 m07166/m07214）：带余量推进 —— 越靠近顶/底动得越少，
+            #   不会连续几笔就粘死在 1.0 / 0.0 上（否则后面再夸再骂都推不动）。
+            room = (1.0 - cur) if step > 0 else cur
+            h[k] = _clamp(cur + step * (0.25 + 0.75 * room), 0.0, 1.0)
     return h

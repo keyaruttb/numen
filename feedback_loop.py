@@ -353,7 +353,9 @@ class FeedbackLoop(object):
         return self.settle(fid, severity=severity, trust_ok=trust_ok, now=now, **kw)
 
     # ---------------- ④ 落地链路 ----------------
-    def _apply(self, row, r, sev, level, now=None):
+    def _apply_inline(self, row, r, sev, level, now=None):
+        """顺序执行七步（总线不可用时的兜底；原来就是这份）。"""
+        row = dict(row) if row is not None and not isinstance(row, dict) else (row or {})
         steps = {}
         mid = row.get("mem_id")
         for name, fn in (
@@ -370,6 +372,119 @@ class FeedbackLoop(object):
             except Exception as e:
                 steps[name] = "err:%s" % e
         return steps
+
+    # ---- V9.7 信号总线：七步结算改由事件派发（他的形态 + 我们的数学）---------
+    def _bus(self):
+        """惰性建总线并注册适配器；拿不到 signalbus 就返回 None（自动退回顺序执行）。"""
+        if getattr(self, "_bus_obj", None) is not None:
+            return self._bus_obj
+        if getattr(self, "_bus_disabled", False):
+            return None
+        try:
+            import signalbus as sb
+        except Exception as e:
+            self._bus_disabled = True
+            print("[feedback] 总线不可用，退回顺序结算：%s" % e)
+            return None
+        bus = sb.Bus(card=self.card)
+        bus.add("hormone_tap", (sb.EV_HORMONE_TAP,), self._h_hormone, order=10)
+        bus.add("memory_struct", (sb.EV_MEM_REINFORCE, sb.EV_MEM_WEAKEN), self._h_memory,
+                order=20)
+        bus.add("rpe_pulse", (sb.EV_RPE_PULSE,), self._h_rpe, order=15)
+        bus.add("impression_observe", (sb.EV_IMPRESSION_OBSERVE,), self._h_impression,
+                order=30)
+        bus.add("affect_update", (sb.EV_AFFECT_UPDATE,), self._h_affect, order=40)
+        bus.add("drive_adjust", (sb.EV_DRIVE_BUMP, sb.EV_DRIVE_ITCH), self._h_drive,
+                order=50)
+        bus.add("intention_propose", (sb.EV_INTENTION_PROPOSE,), self._h_intention,
+                order=60)
+        self._bus_obj = bus
+        return bus
+
+    def bus_snapshot(self):
+        bus = getattr(self, "_bus_obj", None)
+        return bus.snapshot() if bus is not None else {"enabled": False}
+
+    def _apply(self, row, r, sev, level, now=None):
+        """总线版：先派发事件；任何一环炸掉就退回顺序执行。"""
+        row = dict(row) if row is not None and not isinstance(row, dict) else (row or {})
+        bus = self._bus()
+        if bus is None:
+            return self._apply_inline(row, r, sev, level, now)
+        try:
+            import signalbus as sb
+            mid = row.get("mem_id")
+            payload = {"row": row, "mid": mid, "r": r, "sev": sev, "level": level,
+                       "now": now, "card": self.card}
+            steps = {}
+            bus.dispatch(sb.EV_HORMONE_TAP, payload)
+            steps["hormone"] = payload.get("out_hormone")
+            bus.dispatch(sb.EV_MEM_REINFORCE if float(r) >= 0 else sb.EV_MEM_WEAKEN, payload)
+            steps["mem"] = payload.get("out_mem")
+            bus.dispatch(sb.EV_RPE_PULSE, payload)
+            steps["rpe"] = payload.get("out_rpe")
+            bus.dispatch(sb.EV_IMPRESSION_OBSERVE, payload)
+            steps["impression"] = payload.get("out_impression")
+            bus.dispatch(sb.EV_AFFECT_UPDATE, payload)
+            steps["affect"] = payload.get("out_affect")
+            bus.dispatch(sb.EV_DRIVE_BUMP if float(r) >= 0 else sb.EV_DRIVE_ITCH, payload)
+            steps["motiv"] = payload.get("out_motiv")
+            bus.dispatch(sb.EV_INTENTION_PROPOSE, payload)
+            steps["intention"] = payload.get("out_intention")
+            # 学习评价/突触这一步没有独立事件，跟着记忆走（同一个语义）
+            steps["synapse"] = self._apply_synapse(mid, r)
+            steps["learn"] = self._apply_learn(mid, r, level, now)
+            if not steps.get("mem"):
+                steps["mem"] = self._apply_mem(mid, r, sev)
+            if not steps.get("intention"):
+                steps["intention"] = self._make_intentions(row, r, sev, now)
+            return steps
+        except Exception as e:
+            print("[feedback] 总线派发失败，退回顺序结算：%s" % e)
+            self._bus_disabled = True
+            return self._apply_inline(row, r, sev, level, now)
+
+    # ---- 适配器：签名统一 (sig) -> 返回值写进 payload["out_*"] --------------
+    def _h_hormone(self, sig):
+        sig.payload["out_hormone"] = self._apply_hormone(sig.get("r"), sig.get("sev"))
+
+    def _h_memory(self, sig):
+        r = float(sig.get("r") or 0.0)
+        sig.payload["out_mem"] = self._apply_mem(sig.get("mid"), r, sig.get("sev"))
+
+    def _h_rpe(self, sig):
+        """RPE 直注：只改情绪引擎的预期与脉冲；内脏激素上面那一步已经改过了。"""
+        try:
+            link = self.card._emotion()
+        except Exception as e:
+            sig.payload["out_rpe"] = "no_link:%s" % e
+            return
+        r = float(sig.get("r") or 0.0)
+        rpe = max(-1.0, min(1.0, r / float(R_CAP or 1.0)))
+        res = link.inject_rpe(rpe, scenario=str(sig.get("row", {}).get("kind") or "generic"),
+                              intensity=1.0)
+        if res is None:
+            sig.payload["out_rpe"] = "skip"
+            return
+        sig.payload["out_rpe"] = {"rpe": round(float(getattr(res, "rpe", 0.0)), 4),
+                                  "scenario": getattr(res, "scenario", ""),
+                                  "turn": getattr(res, "turn", None)}
+
+    def _h_impression(self, sig):
+        sig.payload["out_impression"] = self._apply_impression(
+            sig.get("row"), float(sig.get("r") or 0.0), sig.get("now"))
+
+    def _h_affect(self, sig):
+        sig.payload["out_affect"] = self._apply_affect(
+            sig.get("row"), float(sig.get("r") or 0.0), sig.get("sev"), sig.get("now"))
+
+    def _h_drive(self, sig):
+        sig.payload["out_motiv"] = self._apply_motiv(
+            float(sig.get("r") or 0.0), sig.get("sev"))
+
+    def _h_intention(self, sig):
+        sig.payload["out_intention"] = self._make_intentions(
+            sig.get("row"), float(sig.get("r") or 0.0), sig.get("sev"), sig.get("now"))
 
     def _apply_hormone(self, r, sev):
         import hormone
