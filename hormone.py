@@ -355,3 +355,27 @@ def describe(hs):
         "皮质醇": round(hs.get("h_cort", 0), 3),
         "催产素": round(hs.get("h_oxy", 0), 3),
     }
+
+
+def apply_r(hs, r, scale=0.22, severity=0.0):
+    """V9.0：按奖励标量扰动四慢激素（四键 0..1，与 hormone.H_BASE 同刻度）.
+
+    正反馈：抬催产素/多巴胺，稍压皮质醇；负反馈：抬皮质醇、压血清素/多巴胺，
+    幅度再乘 (0.6 + 0.4*severity)（越狠越重）。小步：scale=0.22 只挪底色。
+    """
+    h = dict(hs or {})
+    r = float(r or 0.0)
+    sev = max(0.0, min(1.0, float(severity or 0.0)))
+    amp = min(1.0, abs(r) / 0.5) * float(scale)
+    if amp <= 0:
+        return h
+    if r > 0:
+        g = {"h_oxy": 0.9, "h_dopa": 0.7, "h_sero": 0.2, "h_cort": -0.2}
+    else:
+        w = 0.6 + 0.4 * sev
+        g = {"h_cort": 1.0 * w, "h_sero": -0.8 * w,
+             "h_dopa": -0.7 * w, "h_oxy": -0.3 * w}
+    for k, mul in g.items():
+        if k in h:
+            h[k] = _clamp(float(h[k]) + amp * abs(mul) * (1 if mul > 0 else -1), 0.0, 1.0)
+    return h

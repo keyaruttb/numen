@@ -330,6 +330,7 @@ GATE_WRITE_POST = frozenset((
     "/skill_add", "/skill_use", "/config", "/config_all", "/identity",
     "/identity/set", "/injection", "/avatar", "/shutdown",
     "/narrative/write",   # 写我自己那一段叙事
+    "/feedback", "/review/run", "/review/confirm",   # V9.0 反馈环
 ))
 
 # 控制台下拉框里的候选音色（edge-tts 的常用中文音色）。
@@ -1678,6 +1679,109 @@ class Handler(BaseHTTPRequestHandler):
                 if not row:
                     return self._fail(400, "bad_r", "r 要在 -1..1")
                 return self._send(200, {"ok": True, "item": row})
+
+            # ---- V9.0–V9.3 反馈与反思闭环（2026-11-20） ----
+            if method == "GET" and path == "/feedback":
+                try:
+                    qs = parse_qs(urlparse(self.path).query)
+                except Exception:
+                    qs = {}
+                try:
+                    limit = int((qs.get("limit") or ["20"])[0])
+                except Exception:
+                    limit = 20
+                st = (qs.get("status") or [""])[0] or None
+                with m.lock:
+                    rows = m.card.feedback.list(limit=limit, status=st)
+                return self._send(200, {"ok": True, "items": rows,
+                                        "stats": m.card.feedback.stats()})
+            if method == "GET" and path == "/feedback/stats":
+                with m.lock:
+                    return self._send(200, {"ok": True,
+                                            "stats": m.card.feedback.stats()})
+            if method == "POST" and path == "/feedback":
+                # 两种用法：带 fb_id = 结算；不带 = 登记一条待结算
+                try:
+                    body = self._body()
+                except Exception as e:
+                    return self._fail(400, "bad_body", str(e)[:120])
+                fb = m.card.feedback
+                with m.lock:
+                    if body.get("fb_id") not in (None, ""):
+                        out = fb.settle(int(body["fb_id"]),
+                                        approval=body.get("approval") or 0,
+                                        correction=body.get("correction") or 0,
+                                        reject=body.get("reject") or 0,
+                                        confirm=body.get("confirm") or 0,
+                                        confirm_weak=body.get("confirm_weak") or 0,
+                                        disconfirm=body.get("disconfirm") or 0,
+                                        reuse=body.get("reuse") or 0,
+                                        promise=body.get("promise") or 0,
+                                        note=body.get("note"),
+                                        trust_ok=body.get("trust_ok"),
+                                        severity=body.get("severity"))
+                        if not out or out.get("error"):
+                            return self._fail(400, "bad_settle",
+                                              str((out or {}).get("error") or "结算失败")[:160])
+                        return self._send(200, {"ok": True, "feedback": out})
+                    fid = fb.record(kind=str(body.get("kind") or "self_utterance"),
+                                    mem_id=body.get("mem_id"),
+                                    dialogue_id=body.get("dialogue_id"),
+                                    actor=str(body.get("actor") or "self"),
+                                    note=str(body.get("note") or ""),
+                                    source=str(body.get("source") or "explicit"),
+                                    trust_ok=bool(body.get("trust_ok", True)))
+                return self._send(200, {"ok": True, "fb_id": fid})
+            if method == "POST" and path == "/review/run":
+                try:
+                    body = self._body()
+                except Exception:
+                    body = {}
+                with m.lock:
+                    out = m.card.feedback.nightly(force=bool(body.get("force", True)))
+                return self._send(200, {"ok": True, "result": out})
+            if method == "POST" and path == "/review/confirm":
+                try:
+                    body = self._body()
+                except Exception as e:
+                    return self._fail(400, "bad_body", str(e)[:120])
+                rid = body.get("review_id")
+                if rid in (None, ""):
+                    return self._fail(400, "need_fields", "要 review_id")
+                with m.lock:
+                    out = m.card.feedback.confirm_review(int(rid),
+                                                        confirmed=int(bool(body.get("confirmed", True))))
+                return self._send(200, {"ok": True, "result": out})
+            if method == "GET" and path == "/review":
+                try:
+                    qs = parse_qs(urlparse(self.path).query)
+                except Exception:
+                    qs = {}
+                try:
+                    limit = int((qs.get("limit") or ["20"])[0])
+                except Exception:
+                    limit = 20
+                with m.lock:
+                    rows = m.card.feedback.list_reviews(limit=limit)
+                return self._send(200, {"ok": True, "items": rows})
+            if method == "GET" and path == "/learn_eval":
+                try:
+                    qs = parse_qs(urlparse(self.path).query)
+                except Exception:
+                    qs = {}
+                mid = (qs.get("mem_id") or [""])[0]
+                with m.lock:
+                    if mid:
+                        row = m.card.feedback.learn_eval(int(mid))
+                    else:
+                        row = m.card.db.execute(
+                            "SELECT * FROM learn_eval ORDER BY value DESC LIMIT 20").fetchall()
+                        row = [dict(r) for r in row]
+                return self._send(200, {"ok": True, "items": row})
+            if method == "GET" and path == "/intentions":
+                with m.lock:
+                    rows = m.card.feedback.active_intentions()
+                return self._send(200, {"ok": True, "items": rows})
             if method == "GET" and path == "/dream/pending":
                 # 梦境压缩（卡侧）：把还没消化的对话原文掏出来给外面的提炼器。
                 # 顺手带上死信：失败过的批次要让人看得见、能重试，不能静默烂在库里。

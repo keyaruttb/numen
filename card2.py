@@ -1495,6 +1495,15 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         self._detail_emb_cache = {}
         # 🔧 T4-3c：主干向量缓存（mem_id -> np.ndarray）
         self._core_vec_cache = {}
+        # V9.0–V9.3 反馈与反思闭环：五张表由 feedback_loop.ensure 建/补列（幂等），
+        # 装配失败不拖垮开卡（反馈是旁路，坏一层不毁主链）。
+        self.feedback = None
+        try:
+            import feedback_loop as _fbm
+            _fbm.ensure(self.db)
+            self.feedback = _fbm.FeedbackLoop(self)
+        except Exception as _e:
+            print("[card2] 反馈环装配失败:", _e)
 
     # ---------- 内分泌四激素（V5.0 §4 / T3-2）----------
     def _load_hormones(self):
@@ -1603,6 +1612,12 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             dt_h = max(0.0, min(72.0, (now - float(self.mo["ts"])) / 3600.0))
         self.mo["d"] = motiv.settle(self.mo["d"], dt_h)
         self.mo["ts"] = now
+        # V9.2：先把意向池按半衰期衰减，再让它参与候选加权
+        try:
+            if self.feedback is not None:
+                self.feedback.decay_intentions(now=now)
+        except Exception:
+            pass
         # 🔧 2026-11-09：settle 只往基线靠，但基线不是 0 ——
         #    如果刚聊完，attachment/care 被满足、低于基线，settle 会把它们拉回基线，
         #    但不会**超过**基线。没有人超基线 → candidates 不产出 → 【动机】永远空。
@@ -1632,6 +1647,11 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                "quiet": bool(quiet), "at_school": bool(at_school),
                "sent_today": int((self.mo.get("sent") or {}).get(dk, 0)),
                "learned_today": int((self.mo.get("learned") or {}).get(dk, 0))}
+        try:
+            _ints = (self.feedback.active_intentions() if self.feedback is not None else [])
+        except Exception:
+            _ints = []
+        ctx["intentions"] = _ints
         cands = motiv.candidates(self.mo["d"], ctx)
         chosen, rejected = motiv.arbitrate(cands, ctx)
         res = {"now": now, "dt_hours": round(dt_h, 3),
@@ -3374,6 +3394,14 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         n_settled = self._settle_recall_events()
         if n_settled:
             events.append((0, "settle_recall", n_settled))
+        # V9.2：夜间反思（内部按 fb_nightly_hours 节流，不节流也不重活）
+        try:
+            if self.feedback is not None:
+                _fb_out = self.feedback.nightly(now=now)
+                if _fb_out.get("ran"):
+                    events.append((0, "feedback_nightly", 1))
+        except Exception:
+            pass
         # 0.1) 清掉早就结算完的召回事件（只 settled 不删，表会一直涨：
         #      实测两天就 2226 行、其中 1763 行来自同一天）
         try:
@@ -6607,6 +6635,12 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     " WHERE parent_id=?", (g * 0.8, ts, mid))
                 # 同步本地副本，让同一天的多次（跨天）累积正确
                 r = c.execute("SELECT * FROM mem WHERE id=?", (mid,)).fetchone()
+                # V9.2：学习笔记被想起 → learn_eval.times_used + 1（同日一次）
+                try:
+                    if self.feedback is not None:
+                        self.feedback.learn_eval_use(mid, now=ts)
+                except Exception:
+                    pass
         c.executemany("UPDATE recall_event SET settled=1 WHERE id=?",
                       [(i,) for i in settled_ids])
         self.db.commit()
