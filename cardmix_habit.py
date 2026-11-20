@@ -32,6 +32,23 @@ import re
 import time
 
 
+_RELAY_PREFIX = None
+
+
+def _strip_relay_prefix(text):
+    """剥「[私聊] 昵称：」/「[群聊] 昵称：」前缀（只剥开头那一层）。"""
+    global _RELAY_PREFIX
+    if not text:
+        return text
+    try:
+        if _RELAY_PREFIX is None:
+            import re as _re
+            _RELAY_PREFIX = _re.compile(r"^\[[^\]]{1,8}\]\s*[^：:\n]{0,24}[：:]\s*")
+        return _RELAY_PREFIX.sub("", str(text))
+    except Exception:
+        return text
+
+
 class MixHabit(object):
     """习惯 / 印象的读取与维护。方法原样搬来，一行没改。"""
 
@@ -126,10 +143,11 @@ class MixHabit(object):
         写坏了不该把整条记忆写入带崩。语义没变 —— 只记别人的话。
         """
         try:
+            _t = _strip_relay_prefix(text)
             impression_mod.observe(
                 self.db,
                 subject=(about_uid or ("user" if (speaker or "") == "user" else "")),
-                text=text, ts=(ts if ts is not None else self.clock.now()),
+                text=_t, ts=(ts if ts is not None else self.clock.now()),
                 subject_kind=("person" if (about_uid or speaker) else "thing"),
                 now=self.clock.now(), via=via)
             return True

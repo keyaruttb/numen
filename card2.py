@@ -3810,6 +3810,47 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                       " WHERE id=?", (HUSK_W, now, r["id"]))
             events.append((r["id"], "flash_expired", round(HUSK_W, 4)))
 
+        # 4c) keep 配额（R8, 2026-11-20）
+        #     keep 是「永不自动忘」，但要是每条都标 keep，遗忘就名存实亡。
+        #     超配额时只降级不删除：tier keep -> mid，正文一字不动，台账记一笔。
+        try:
+            _keep_max = int(os.environ.get("WHALE_KEEP_MAX", "200") or 200)
+        except Exception:
+            _keep_max = 200
+        try:
+            _kn = c.execute("SELECT count(*) FROM mem WHERE tier=? AND dead=0",
+                            (TIER_PROTECTED,)).fetchone()[0]
+        except Exception:
+            _kn = 0
+        if _keep_max > 0 and _kn > _keep_max:
+            _over = _kn - _keep_max
+            rows = c.execute(
+                "SELECT id, w, pin, COALESCE(t_last_recall, t_anchor, 0) AS lr FROM mem"
+                " WHERE tier=? AND dead=0 ORDER BY w ASC, lr ASC LIMIT ?",
+                (TIER_PROTECTED, _over * 2)).fetchall()
+            _demoted = 0
+            for r in rows:
+                if _demoted >= _over:
+                    break
+                _mid = int(r["id"])
+                _pinned = bool(r["pin"])
+                if _pinned:
+                    continue
+                c.execute("UPDATE mem SET tier=? WHERE id=? AND tier=?",
+                          (TIER_MID, _mid, TIER_PROTECTED))
+                _demoted += 1
+                events.append((_mid, "keep_demoted", round(float(r["w"] or 0), 4)))
+                try:
+                    import governance as _gv8
+                    _gv8.ensure(self.db)
+                    _gv8.decide(self.db, "mem", _mid, "update",
+                                reason="keep 超配额（%d > %d），降为 mid" % (_kn, _keep_max),
+                                source="retention_cap", exec_state="applied")
+                except Exception:
+                    pass
+            if _demoted:
+                events.append((0, "keep_cap", _demoted))
+
         # 5) 五空间下沉（T5-1 / V5.0 §12.5）
         #    长期 → 潜意识 → 深层痕迹 → TRACE 计数。
         #    每一步都只「降低可见度」，不删内容；只有最后一步才真的把正文换成计数。
@@ -7173,14 +7214,19 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         n_neg = int(ar.get("n_neg") or 0)
         if n_pos + n_neg < 1:
             return ""
-        if sf < 0.45 or v <= -0.10:
-            # 还没把握他会不会突然冷下来：收着，别拿玩笑去试
-            if v <= -0.18:
+        # 口径：三句话只把 valence 推动 ±0.02，光看 valence 这层永远不亮。
+        # 所以以「次数」为主判断方向，valence 只用来决定轻重。
+        _neg = (n_neg >= 2 and n_neg > n_pos) or v <= -0.10 or sf < 0.45
+        _pos = (n_pos >= 2 and n_pos > n_neg and sf >= 0.45) or (v >= 0.12 and sf >= 0.55)
+        if _neg and not _pos:
+            if v <= -0.12 or n_neg >= 4:
                 return "心里还有点介意，话说得短一点"
             return "跟他说话要收着点，别乱开玩笑"
-        if v >= 0.12 and sf >= 0.55:
-            return "跟他处得顺，可以闹一点"
-        if sf >= 0.62:
+        if _pos and not _neg:
+            if n_pos >= 4 or (v >= 0.12 and sf >= 0.55):
+                return "跟他处得顺，可以闹一点"
+            return "跟他说话不用太小心"
+        if sf >= 0.62 and n_neg == 0:
             return "跟他说话不用太小心"
         return ""
 
