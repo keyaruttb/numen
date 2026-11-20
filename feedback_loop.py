@@ -489,6 +489,9 @@ class FeedbackLoop(object):
         return {"drive": drive, "amp": round(amp, 4)}
 
     def _make_intentions(self, row, r, sev, now=None):
+        # 中性（|r| 没到阈值）不生意向：一件说不上好坏的事，不该让我「想躲」。
+        if abs(float(r or 0.0)) <= float(POS_TH) + 1e-9:
+            return []
         if abs(r) < 0.02:
             return []
         mid = row.get("mem_id")
@@ -657,6 +660,17 @@ class FeedbackLoop(object):
         return True
 
     # ---------------- ⑦ 夜间反思 ----------------
+    def drop_stale(self, days=3.0, now=None):
+        """过期未结算的 open 直接标 dropped：没有证据的评价不该一直挂着。"""
+        now = float(now or self._now())
+        cutoff = now - float(days) * 86400.0
+        c = self.card.db.cursor()
+        c.execute("UPDATE feedback SET status='dropped'"
+                  " WHERE status='open' AND ts_action < ?", (cutoff,))
+        n = c.rowcount or 0
+        self.card.db.commit()
+        return n
+
     def nightly(self, now=None, force=False):
         nowv = self._now(now)
         gap_h = self._p("fb_nightly_hours")
@@ -671,6 +685,10 @@ class FeedbackLoop(object):
             return {"ran": False, "reason": "throttled",
                     "next_in_h": round(gap_h - (nowv - last) / 3600.0, 2)}
         out = {"ran": True, "now": round(nowv, 3)}
+        try:
+            out["dropped"] = self.drop_stale(now=nowv)
+        except Exception as e:
+            out["dropped"] = "err:%s" % e
         try:
             out["facts"] = self.reconcile_facts(now=nowv)
         except Exception as e:

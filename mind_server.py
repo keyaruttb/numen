@@ -877,6 +877,14 @@ class Mind(object):
                     # 以前这里是 except: pass —— 一次 NOT NULL 约束错误被吞了两个月，
                     # 原文表再没长过一条都没人发现。至少要留一行日志。
                     print("[mind] 原文落盘失败：%s" % e, file=sys.stderr)
+            # V9.0：我这一句是可被评价的对象 —— 先挂成 open，
+            # 之后他纠正/复用/明确否定时再结算（不结算就一直 open，夜间会被清掉）。
+            if reply_mid:
+                try:
+                    self.card.feedback_open("self_utterance", reply_mid,
+                                            note=str(reply or "")[:80], source="explicit")
+                except Exception as e:
+                    print("[mind] 反馈登记失败：%s" % e, file=sys.stderr)
             return {"mem_id": mid, "reply_mem_id": reply_mid}
 
     # ---- 短期对话原文：放卡里，不放模型那边 ----
@@ -1965,6 +1973,20 @@ class Handler(BaseHTTPRequestHandler):
                                        "tasks": _learn.listing(m.card.db, limit=5)}
                     except Exception as e:
                         ov["learn"] = {"err": str(e)}
+                    try:
+                        # V9.0：反馈环也露一面 —— 态度、意向、复盘各取几条
+                        fb = m.card.feedback
+                        ov["fb"] = {"stats": fb.stats(),
+                                    "intentions": fb.active_intentions()[:4],
+                                    "reviews": fb.list_reviews(limit=2),
+                                    "affect": []}
+                        try:
+                            import impression_eval as _ie
+                            ov["fb"]["affect"] = _ie.snapshot(m.card.db, limit=4) or []
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        ov["fb"] = {"err": str(e)}
                 return self._send(200, ov)
             if method == "GET" and path == "/avatar":
                 # 头像文件本身。走文件不走数据库 —— 见 console.py 的说明。

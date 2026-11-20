@@ -5788,6 +5788,22 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 return out
         return None
 
+    def feedback_open(self, kind, mem_id, dialogue_id=None, note="",
+                      source="explicit", trust_ok=True):
+        """V9.0：给这一轮的可评价对象登记一条「待结算」。
+        没有反馈环（老卡/关掉）时安静返回 None，不打断主链路。"""
+        fb = getattr(self, "feedback", None)
+        if fb is None or not mem_id:
+            return None
+        try:
+            return fb.record(kind=kind, mem_id=int(mem_id),
+                             dialogue_id=dialogue_id, actor="self",
+                             note=str(note or "")[:200], source=source,
+                             trust_ok=trust_ok)
+        except Exception as e:
+            print("[card2] 反馈登记失败：%s" % e)
+            return None
+
     def apply_recall_effects(self, hits, query, touch=True):
         """把「被想起」这笔记账推迟到锁里补写（读写分离第 2 步）。
 

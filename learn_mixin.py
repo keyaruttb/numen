@@ -126,6 +126,11 @@ class LearnMixin(object):
             ).fetchone()
             if row_t:
                 done = learn.finish(conn, row_t[0], mem_id=mid, note=text[:2000], test=test)
+        try:
+            self.feedback_open("learn", mid, note=str(topic or "")[:80],
+                               source="implicit")
+        except Exception as e:
+            print("[learn] 反馈登记失败：%s" % e)
         return {"ok": True, "mem_id": mid, "fact": fact_ok, "test": test, "task": done}
 
     def learn_render(self, limit=8):
