@@ -210,6 +210,23 @@ class MixHabit(object):
         except Exception:
             return {}
 
+    def affect_linked(self, uid=None, limit=32):
+        """他/这件事绑着哪些记忆（impression_eval 的 linked_mems）。"""
+        try:
+            import impression_eval as aff
+            r = aff.read(self.db, "person", str(uid or self._affect_uid()))
+        except Exception:
+            return []
+        if not r:
+            return []
+        out = []
+        for x in (r.get("linked_mems") or []):
+            try:
+                out.append(int(x))
+            except Exception:
+                continue
+        return out[:int(limit)]
+
     def _affect_uid(self):
         for attr in ("_affect_uid_cache", "about_uid", "_about_uid"):
             v = getattr(self, attr, None)

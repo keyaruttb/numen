@@ -6338,6 +6338,36 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             scored = _score_rows(rows, region_boost=False)
 
         scored.sort(key=lambda x: -x[0])
+        # V9.4：态度里的联想池 → 给这些记忆一点加成（触景忆旧事）。
+        # 只加一点点：它让「跟他/这件事有关」的旧事更容易浮上来，
+        # 但不该压过真正对得上的那条（0.03 量级，远小于一个名次的差）。
+        if os.environ.get("WHALE_AFFECT_LINK", "1") != "0":
+            try:
+                _ab = self._affect_link_boost(q_clean)
+            except Exception:
+                _ab = {}
+            if _ab:
+                _bd = []
+                for _h in scored:
+                    _mid = int(_h[2]["id"]) if _h[2]["id"] is not None else 0
+                    _add = _ab.get(_mid) or 0.0
+                    _bd.append((float(_h[0]) + _add,) + tuple(_h[1:]))
+                scored = _bd
+                # 不在候选里的联想记忆：以很低的分数补进来 —— 平时它们排不进前 13，
+                # 只在「没什么对得上的」时才浮上来（触景忆旧事，而不是硬塞）。
+                _have = {int(h[2]["id"]) for h in scored if h[2]["id"] is not None}
+                for _mid, _add in list(_ab.items())[:8]:
+                    if _mid in _have:
+                        continue
+                    try:
+                        _r2 = c.execute(_SEL + "WHERE m.id=? AND " + _LIVE, (_mid,)).fetchone()
+                    except Exception:
+                        _r2 = None
+                    if _r2:
+                        scored.append((float(_add) * 0.5, 0.35, _r2))
+                scored.sort(key=lambda x: -x[0])
+                if trace is not None:
+                    trace["affect_link"] = len(_ab)
         if _UNION_ON:
             try:
                 scored = self._union_rerank(query, q_clean, rows, scored)
@@ -6860,9 +6890,125 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 parts.append({"A": "刚才被暖了一下",
                               "B": "刚才那句还有点堵",
                               "C": "刚缓过来一点"}.get(ek, ""))
+        # V9.4：态度也进这句 —— 它是「对他」的分寸，不是心情，所以排在最后
+        try:
+            _tn = self._affect_tone()
+        except Exception:
+            _tn = ""
+        if _tn:
+            parts.append(_tn)
         if not parts:
             return ""
         return "（" + "，".join(parts) + "）"
+
+    # ---------- V9.4：态度 → 说话的分寸 ----------
+    def _affect_tone(self, uid=None):
+        """把「对他的态度」翻成一句使用说明（不是台词）。
+
+        safety 低 = 我还没把握他会不会突然冷下来 → 收着点、别乱开玩笑；
+        valence 高 = 跟他处得顺 → 敢闹、话可以多一点。
+        只读，不改状态；拿不到就返回 ""。
+        """
+        if os.environ.get("WHALE_AFFECT_TONE", "1") == "0":
+            return ""
+        try:
+            ar = self.affect_read("person", uid or self._affect_uid())
+        except Exception:
+            return ""
+        if not ar:
+            return ""
+        v = float(ar.get("valence") or 0.0)
+        sf = float(ar.get("safety") or 0.5)
+        n_pos = int(ar.get("n_pos") or 0)
+        n_neg = int(ar.get("n_neg") or 0)
+        if n_pos + n_neg < 1:
+            return ""
+        if sf < 0.45 or v <= -0.10:
+            # 还没把握他会不会突然冷下来：收着，别拿玩笑去试
+            if v <= -0.18:
+                return "心里还有点介意，话说得短一点"
+            return "跟他说话要收着点，别乱开玩笑"
+        if v >= 0.12 and sf >= 0.55:
+            return "跟他处得顺，可以闹一点"
+        if sf >= 0.62:
+            return "跟他说话不用太小心"
+        return ""
+
+    # ---------- V9.4：态度里的联想池 → 召回加成 ----------
+    def _affect_link_boost(self, q_clean=""):
+        """读出「跟这个人/这件事绑在一起的记忆」，召回时给它们一点权重。
+
+        这是说明书里预留的第 3 条（linked_mems 预热召回）：不是替她决定想什么，
+        而是让跟她有关系的旧事在候选里更靠前一点。WHALE_AFFECT_LINK=0 可关。
+        """
+        if os.environ.get("WHALE_AFFECT_LINK", "1") == "0":
+            return {}
+        try:
+            ids = self.affect_linked(self._affect_uid(), limit=32)
+        except Exception:
+            return {}
+        out = {}
+        for i, mid in enumerate(ids):
+            out[int(mid)] = 0.030 / (1.0 + 0.08 * i)
+        return out
+
+    # ---------- V9.4：意向 → 行动 ----------
+    def act_on_intentions(self, now=None, limit=3):
+        """把「想做但还没做」的意向真做掉，做不掉就留着。
+
+        只做便宜、可回滚、不需要模型的三件：
+          learn_more / explore → 排一条学习任务（真去学）
+          self_check            → 做一次自查（收过期反馈 + 事实对账）
+          replay                → 记进工作台（提醒自己下次说）
+        避免场景（avoid_scene）什么都不做 —— 它的作用只是让语气收着点。
+        """
+        fb = getattr(self, "feedback", None)
+        if not fb:
+            return {"ok": False, "why": "no_feedback"}
+        now = float(now or time.time())
+        done = []
+        _its = fb.active_intentions(limit=24)
+        # 便宜的先做：自查、记一笔不花时间；学习要排队，排在后面
+        _its.sort(key=lambda x: (0 if str(x.get("kind")) in ("self_check", "replay") else 1,
+                                 -float(x.get("urge") or 0.0)))
+        for it in _its:
+            if len(done) >= limit:
+                break
+            kind = str(it.get("kind") or "")
+            urge = float(it.get("urge") or 0.0)
+            # 便宜的事（自查、记一笔）门槛低一点；要花时间的（学习）才等它更急
+            _need = 0.08 if kind in ("self_check", "replay") else 0.15
+            if urge < _need:
+                continue
+            mid = it.get("mem_id")
+            try:
+                if kind in ("learn_more", "explore") and hasattr(self, "learn_enqueue"):
+                    topic = ""
+                    if mid:
+                        row = self.db.execute("SELECT raw FROM mem WHERE id=?", (int(mid),)).fetchone()
+                        topic = str(row[0] or "")[:40] if row else ""
+                    if topic:
+                        r = self.learn_enqueue(topic, why="意向：" + kind, source="intention", prio=min(0.9, 0.45 + urge * 0.5))
+                        if r:
+                            done.append(("learn", kind, topic))
+                            fb.consume_intention(it["id"], note="已排学习")
+                elif kind == "self_check":
+                    fb.reconcile_facts(now=now)
+                    fb.drop_stale(now=now)
+                    done.append(("self_check", kind, "过期反馈/事实对账"))
+                    fb.consume_intention(it["id"], note="已自查")
+                elif kind == "replay":
+                    done.append(("replay", kind, str(mid or "")))
+                    fb.consume_intention(it["id"], note="记进工作台")
+            except Exception as ex:
+                done.append(("err", kind, str(ex)[:60]))
+        if done and hasattr(self, "worklog_add"):
+            try:
+                self.worklog_add("意向行动：" + "；".join("%s(%s)" % (a, c) for a, _b, c in done),
+                                 kind="note", by="self")
+            except Exception:
+                pass
+        return {"ok": True, "done": done}
 
     def core_identity_text(self):
         """把 CORE 区那几条拼成一段给上下文用的人格锚。
@@ -7651,6 +7797,30 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 _sblk = "【学过的】\n" + "\n".join(_slines)
                 out.append(_sblk)
                 sections["study"] = len(_sblk)
+
+        # ⑤.4b 联想的另一半：跟他/这件事绑在一起的旧事（态度里的联想池）。
+        #     只在真有绑定、且没被前面的证据格提到时出现 —— 它是「触景」，
+        #     不是主证据，所以不占证据预算。
+        try:
+            if os.environ.get("WHALE_AFFECT_LINK", "1") != "0":
+                _lids = list(self.affect_linked(self._affect_uid(), limit=4))[:4]
+                _used = set(int(h[2]["id"]) for h in hits if h[2]["id"] is not None)
+                _ll = []
+                for _m in _lids:
+                    if int(_m) in _used:
+                        continue
+                    _r3 = self.db.execute("SELECT raw FROM mem WHERE id=?", (int(_m),)).fetchone()
+                    if not _r3 or not _r3[0]:
+                        continue
+                    _ll.append("- " + _brief_line(_r3[0], 80))
+                    if len(_ll) >= 2:
+                        break
+                if _ll:
+                    _lt = "\n".join(_ll)
+                    out.append("【关联想起】\n" + _lt)
+                    sections["assoc_link"] = len(_lt)
+        except Exception:
+            pass
 
         # ⑤.5 身体（快反应层）：一句话就能动的那一层。
         #     放在【此刻】前面 —— 生理反应比情绪先来，顺序本身也是信息。

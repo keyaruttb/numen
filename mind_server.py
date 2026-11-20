@@ -4246,8 +4246,12 @@ def _start_maintenance(mind):
         lrn_sec = float(os.environ.get("WHALE_LEARN_SEC", "1800") or 0)
     except Exception:
         lrn_sec = 1800.0
+    try:
+        act_sec = float(os.environ.get("WHALE_ACT_SEC", "1200") or 0)
+    except Exception:
+        act_sec = 1200.0
 
-    last = {"fade": 0.0, "habits": 0.0, "worklog": 0.0, "ckpt": 0.0, "learn": 0.0}
+    last = {"act": 0.0, "fade": 0.0, "habits": 0.0, "worklog": 0.0, "ckpt": 0.0, "learn": 0.0}
     # 线程起来就先记一次心跳：否则 /health 在第一个周期内会误报
     # maintenance_never_ran（明明刚启动，还没来得及跳第一跳）。
     mind._maint_last = time.time()
@@ -4470,6 +4474,26 @@ def _start_maintenance(mind):
                             pass
                 except Exception as e:
                     print("[mind] 学习节拍失败: %s" % e)
+
+            # 2.6) 意向 → 行动（V9.4）：她「想做但还没做」的事，在这里真做掉。
+            #     学习/自查/记一笔，三件都是便宜、可回滚、不需要模型的。
+            if act_sec > 0 and now - last["act"] >= act_sec:
+                try:
+                    with mind.lock:
+                        _ar = mind.card.act_on_intentions(now=now)
+                    last["act"] = now
+                    _dn = (_ar or {}).get("done") or []
+                    if _dn:
+                        print("[mind] 意向行动：%s" % "；".join(
+                            "%s(%s)" % (a, str(c)[:24]) for a, _b, c in _dn))
+                        try:
+                            if mind.tl is not None:
+                                mind.tl.append("act", "意向行动：" + "；".join(
+                                    str(c)[:30] for _a, _b, c in _dn))
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print("[mind] 意向行动失败: %s" % e)
 
     t = threading.Thread(target=loop, name="maintenance", daemon=True)
     mind._maint_thread = t

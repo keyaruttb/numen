@@ -582,6 +582,19 @@ class FeedbackLoop(object):
         return done
 
     # ---------------- ⑤ 意向池 ----------------
+    def consume_intention(self, iid, note="", now=None):
+        """意向做完了：标 consumed，别让它永远挂着重复触发。"""
+        now = float(now or time.time())
+        try:
+            self.db.execute(
+                "UPDATE intention SET status='consumed', last_touch_ts=?, note=?"
+                " WHERE id=? AND status='active'",
+                (now, str(note or "")[:120], int(iid)))
+            self.db.commit()
+            return True
+        except Exception:
+            return False
+
     def decay_intentions(self, now=None):
         nowv = self._now(now)
         rows = self._rows("SELECT * FROM intention WHERE status='active'")
