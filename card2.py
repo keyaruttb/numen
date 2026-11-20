@@ -54,6 +54,7 @@ for _v in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS',
     os.environ[_v] = '1'
 
 import hormone
+import hormone_feedback as hf_mod
 import viscera
 import motiv
 import padlib
@@ -1384,6 +1385,17 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         self._load_oxy()
         self._load_mood()
         self._load_hormones()
+        # V9.8 激素负反馈调节器：高浓度时下调分泌增益、加速清除（滞回防抖）
+        try:
+            self.hf = hf_mod.Regulator(cfg=hf_mod.cfg_from_meta(self.db))
+            _hfs = hf_mod.load_state(self.db)
+            if _hfs:
+                self.hf.load_dict(_hfs)
+        except Exception as _hfe:
+            print("[card2] 激素负反馈装配失败: %s" % _hfe)
+            self.hf = None
+        self._hf_mods = {}
+        self._hf_last_events = []
         self._load_viscera()
         self._load_viscera_profile()
         self._load_motiv()
@@ -1531,6 +1543,8 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     "INSERT INTO meta(key,val) VALUES(?,?)"
                     " ON CONFLICT(key) DO UPDATE SET val=excluded.val",
                     (k, repr(self.h[k])))
+            if getattr(self, "hf", None) is not None:
+                hf_mod.save_state(self.db, self.hf)
             self.db.commit()
         except Exception:
             pass
@@ -2256,19 +2270,30 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             _dt_h = max(0.0, _now - float(getattr(self, "_h_ts", _now))) / 3600.0
             if 0.0 < _dt_h <= 24.0 * 7:
                 _base = {k: hormone.H_BASE.get(k, 0.5) for k in hormone.H_KEYS}
-                self.h = hormone.regress_all(self.h, _dt_h, _base)
+                if getattr(self, "hf", None) is not None:
+                    self._hf_mods, _hf_ev = self.hf.tick(self.h, _dt_h)
+                    self.h = hf_mod.regulated_regress(self.h, _dt_h, self._hf_mods, _base)
+                    if _hf_ev:
+                        self._hf_events(_hf_ev)
+                else:
+                    self.h = hormone.regress_all(self.h, _dt_h, _base)
             self._h_ts = _now
         except Exception:
             pass
         kind, s = hormone.classify_event(text)
         before = dict(self.h)
         if kind is not None:
-            self.h = hormone.apply_event(self.h, kind, s)
+            _cand = hormone.apply_event(self.h, kind, s)
+            self.h = (hf_mod.apply_gain(self.h, _cand, self._hf_mods)
+                      if getattr(self, "hf", None) is not None else _cand)
         # 平时那些不咸不淡的话也要推一点点，否则日子过得再热闹，读数也不动
-        self.h = hormone.tone_nudge(self.h, text)
+        _cand = hormone.tone_nudge(self.h, text)
+        self.h = (hf_mod.apply_gain(self.h, _cand, self._hf_mods)
+                  if getattr(self, "hf", None) is not None else _cand)
         if kind is not None:
             # 记一下「刚才被什么戳到」——两小时内这句话还会挂在他嘴边
             self._last_event = (kind, time.time(), s)
+        self.h = hormone.soft(self.h)   # V9.8：所有注入都收进底色软带
         if self.h != before:
             self._save_hormones()
         return (kind, s)
@@ -3539,7 +3564,13 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         # 0.6) 激素回归（V5.0 T3-2）：四个激素往各自基线漂
         if dt_raw > 0:
             _hb = dict(self.h)
-            self.h = hormone.regress_all(self.h, dt_raw / 3600.0)
+            if getattr(self, "hf", None) is not None:
+                self._hf_mods, _hf_ev = self.hf.tick(self.h, dt_raw / 3600.0)
+                self.h = hf_mod.regulated_regress(self.h, dt_raw / 3600.0, self._hf_mods)
+                if _hf_ev:
+                    self._hf_events(_hf_ev)
+            else:
+                self.h = hormone.regress_all(self.h, dt_raw / 3600.0)
             if self.h != _hb:
                 self._save_hormones()
                 events.append((0, "hormone_drift", hormone.describe(self.h)))
@@ -6733,6 +6764,23 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         return len(pairs)
 
     # ---------- 召回事件（V5.0 公理 6）----------
+    def _hf_events(self, evs):
+        """记下激素负反馈的抑制/解除事件（时间线 + 总线，尽力而为）。"""
+        try:
+            self._hf_last_events = list(evs)[-8:]
+        except Exception:
+            pass
+        try:
+            fb = getattr(self, "feedback", None)
+            bus = fb._bus() if (fb is not None and hasattr(fb, "_bus")) else None
+            if bus is not None:
+                for ev in evs:
+                    bus.dispatch(ev.get("event"), payload=ev, ctx={},
+                                 source="hormone_feedback")
+        except Exception:
+            pass
+        return len(evs)
+
     def _write_recall_events(self, pairs, query=None, source="recall"):
         """pairs: [(mem_id, rank), ...]  只记事件，不动 mem 表"""
         if not pairs:

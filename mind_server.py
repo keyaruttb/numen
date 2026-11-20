@@ -333,6 +333,7 @@ GATE_WRITE_POST = frozenset((
     "/feedback", "/review/run", "/review/confirm",   # V9.0 反馈环
     "/act",   # V9.4 立刻把意向做掉一次,
     "/gov/decide", "/speech_policy/update",
+    "/hormone/feedback",
     "/speech_policy",
 ))
 
@@ -1867,6 +1868,43 @@ class Handler(BaseHTTPRequestHandler):
                                  "max_attempts": _ob.MAX_ATTEMPTS})
                 return
 
+            if path == "/hormone/feedback":
+                try:
+                    import hormone_feedback as _hfr
+                    import hormone as _hm
+                    card = m.card
+                    if method == "POST":
+                        body = self._body() or {}
+                        key = str(body.get("key") or "").strip()
+                        if not key:
+                            return self._send(400, {"ok": False, "error": "empty_key"})
+                        if key not in _hfr.DEFAULTS:
+                            return self._send(400, {"ok": False, "error": "bad_key",
+                                                    "keys": list(_hfr.DEFAULTS)})
+                        try:
+                            val = float(body.get("value"))
+                        except Exception:
+                            return self._send(400, {"ok": False, "error": "bad_value"})
+                        with m.lock:
+                            card.db.execute(
+                                "INSERT INTO meta(key,val) VALUES(?,?) "
+                                "ON CONFLICT(key) DO UPDATE SET val=excluded.val",
+                                ("hf_" + key, repr(val)))
+                            card.db.commit()
+                            if getattr(card, "hf", None) is not None:
+                                card.hf.cfg[key] = val
+                        return self._send(200, {"ok": True, "key": key, "value": val})
+                    reg = getattr(card, "hf", None)
+                    if reg is None:
+                        return self._send(200, {"ok": True, "enabled": False})
+                    snap = _hfr.snapshot(reg)
+                    snap["ok"] = True
+                    snap["enabled"] = True
+                    snap["h"] = {k: round(float(v), 4) for k, v in card.h.items()}
+                    snap["events"] = list(getattr(card, "_hf_last_events", []) or [])
+                    return self._send(200, snap)
+                except Exception as _e:
+                    return self._send(500, {"ok": False, "error": str(_e)})
             if path.startswith("/gov"):
                 import governance as _gv
                 if method == "GET" and path == "/gov/log":

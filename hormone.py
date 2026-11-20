@@ -361,6 +361,23 @@ SOFT_HI = 0.85      # 底色软上限：真人极少长期贴顶
 SOFT_LO = 0.15      # 底色软下限
 
 
+def soft(hs):
+    """底色软带：超过 SOFT_HI / 低于 SOFT_LO 的部分只收 30%。
+
+    真人极少长期贴顶或贴底；钳位只防溢出，不收力度。所有注入路径
+    （apply_event / tone_nudge / apply_r）最后都过这一道。
+    """
+    out = {}
+    for k in H_KEYS:
+        cur = float(hs.get(k, H_BASE.get(k, 0.5)))
+        if cur > SOFT_HI:
+            cur = SOFT_HI + (cur - SOFT_HI) * 0.7
+        elif cur < SOFT_LO:
+            cur = SOFT_LO - (SOFT_LO - cur) * 0.7
+        out[k] = _clamp(cur)
+    return out
+
+
 def apply_r(hs, r, scale=0.22, severity=0.0):
     """V9.0：按奖励标量扰动四慢激素（四键 0..1，与 hormone.H_BASE 同刻度）.
 

@@ -541,7 +541,16 @@ class FeedbackLoop(object):
         hs = getattr(self.card, "h", None)
         if not isinstance(hs, dict):
             return "no_card_hormone"
-        self.card.h = hormone.apply_r(hs, r, scale=0.22, severity=sev)
+        _cand = hormone.apply_r(hs, r, scale=0.22, severity=sev)
+        try:
+            import hormone_feedback as _hfm
+            _mods = getattr(self.card, "_hf_mods", None)
+            if getattr(self.card, "hf", None) is not None:
+                self.card.h = _hfm.apply_gain(self.card.h, _cand, _mods)
+            else:
+                self.card.h = _cand
+        except Exception:
+            self.card.h = _cand
         try:
             self.card._save_hormones()
         except Exception:
