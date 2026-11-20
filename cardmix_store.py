@@ -85,7 +85,7 @@ class MixStore:
     def remember(self, text, salience=0.6, ts=None, pool=None,
                  oxy=0.0, entities=None, emotion=None, normalize=True,
                  region=None, speaker=None, mtype=None, source="",
-                 about_uid="", sess=""):
+                 about_uid="", sess="", force=False):
         now = self.clock.now()
         pool = POOL_SHORT if pool is None else pool  # 默认值里不能写 POOL_SHORT：类定义时 card2 还没 import 完
         at = min(now if ts is None else float(ts), now)
@@ -118,6 +118,38 @@ class MixStore:
         #    事件时间仍然由 event_ts 单独解析，不依赖这行改写。
         if normalize and os.environ.get("WHALE_RAW_VERBATIM", "0").strip() not in ("1", "true", "on"):
             text = normalize_time(text, at)
+
+        # 🔧 2026-11-19 入门筛（方案一）：拦「明显没有信息量」的话，宁少拦不拦错。
+        #    位置在 strip_sysmark + 时间归一化之后、split_memory / 向量 / 评估
+        #    之前 —— 这时候拦最省，也不碰检索层（recall / SCORE_W 一个字节没动）。
+        #    判据：assess_value == 0 且长度 ≤3（纯寒暄 / 纯表情 / 单字 / 纯标点）。
+        #    为什么多这一刀长度：assess_value 对 ≤6 字的短句一律 −1.5，
+        #    「我不想你走」「别走好不好」这种带情绪的话也会落成 0；
+        #    只按 value==0 拦会拦错话（设计文档六-2 要求误伤 0 条）。长度 ≤3
+        #    是这批真·寒暄的共同上限 —— 宁可少拦，也不拦掉一句有情绪的短句。
+        #    三个保护（缺一个都不做）：
+        #      ① force=True：/remember 那条「他明确说记」的路传 force，不筛；
+        #      ② 命中 EMO_WORDS 的一律放行（"我害怕"只有 3 字，靠长度挡不住）；
+        #      ③ 拦掉的不删：写 inbox 留痕 not_stored:low_value，可回查。
+        #    显著度传 0.5（中性）：assess_value 末尾会加 (salience-0.5)*0.6，
+        #    用调用方默认的 0.6 会把 0.5 抬成 0.56→1，"晚安"就永远拦不住了。
+        #    region 用调用方给的（没给就是 None，等于不加分区分）。
+        if not force and len(text) <= 3 and not any(w in text for w in EMO_WORDS) \
+                and assess_value(text, region, 0.5) == 0:
+            try:
+                self.inbox_add(text, source=source or "", channel="private",
+                               kind="rejected", note="not_stored:low_value",
+                               ts=at)
+            except Exception as _ge:
+                print("[card2] 入门筛留痕失败: %s" % _ge)
+            if os.environ.get("WHALE_GATE_DEBUG") == "1":
+                print("[gate] 拦掉 value=0：%s" % text[:20])
+            # 🔧 2026-11-19：返回 False 而不是 None，把「被入门筛拦住」和
+            #    「剥完系统壳是空的」（上面 line 102 那个 return None）分开。
+            #    调用方以前一律把 None 报成 empty_after_strip，账记错了地方。
+            #    注意：False 是 falsy，`if not mid` / `if mid:` 的调用点行为不变；
+            #    只有显式 `is None` 的地方需要多认一种值（见 /remember 路由）。
+            return False
 
         core, details = split_memory(text)
         vec = to_vec(text)

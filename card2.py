@@ -1240,10 +1240,8 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             self._conn_release(conn)
 
     def __init__(self, db_path=":memory:", clock=None, card_dir=None):
-        try:
-            self._schema_heal()
-        except Exception:
-            pass
+        # 2026-11-19：_schema_heal() 原在这里调用，但那时 self._db_main 还没建，
+        # 每次 AttributeError 被吞掉 ⇒ heal 从没执行过。挪到 _init_schema() 之后。
         self.clock = clock or Clock()
         self.db_path = db_path
         # 承诺账本（2026-11-11 接进读侧）：表在同一个库里，但**不在 mem 池**——
@@ -1313,6 +1311,12 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         self._init_schema()
         self._migrate()
         self._ensure_soft_cols()
+        # 2026-11-19：heal 必须在 _db_main 建好、schema 建完之后跑（它要用 self.db）。
+        # 原来在 __init__ 开头调用，库还没开 ⇒ AttributeError 被 except 吞掉 ⇒ 从没执行过。
+        try:
+            self._schema_heal()
+        except Exception as _she:
+            print("[card2] schema_heal 失败: %s" % _she)
         self._ensure_cond_table()
         # 运行时配置表（V5.0 §10.9）：场景权重能热改，不用重启服务。
         # 建表在这里而不是 ctxweight 里自己管 —— 卡的所有 schema 只在一个地方建，
@@ -2854,6 +2858,11 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             #    否则一升级就冒出几百条"待做梦"，控制台那个 520 会吓死人，
             #    而且 Dream 会拿三周前的对话去重压一遍 —— 那不是补账，是重复劳动。
             c.execute("UPDATE dialogue SET dreamed=1")
+        # 🔧 2026-11-20 历史灌入：dialogue 加"谁说的"。
+        #    原来只有 role（user/assistant）两值，分不出是爸爸、砚之还是信说的。
+        #    可空：老数据没标就是 NULL，不猜。
+        if "speaker" not in dlcols:
+            c.execute("ALTER TABLE dialogue ADD COLUMN speaker TEXT")
         c.execute("CREATE INDEX IF NOT EXISTS ix_detail_parent ON detail(parent_id)")
         self.db.commit()
 
@@ -3083,7 +3092,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 mid = self.remember(it["text"], salience=it["salience"],
                                     region=it["region"], speaker=speaker,
                                     mtype="episode", source=src_tag)
-                if mid is None:
+                if not mid:   # 2026-11-19：None=剥空/去重，False=被入门筛拦（都不算写进去）
                     problems.append("dedup_by_remember:%s" % it["text"][:16])
                     continue
                 try:
@@ -6934,6 +6943,15 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                         continue
                     _ids.add(_mid)
                     hits.append(_h)
+        # 这一行读的是「最后一次 recall()」留下的 _last_assoc_ids：它记的是哪几条是
+        # 顺带勾出来的（联想来的），每次 recall 开头在 6107 清空、6111 重写。6103-6106
+        # 那段注释是设计契约 —— 对外只返回 3 元组，要区分的调用方自己查这个集合。
+        # 现在安全：MULTIHOP_ON（357）默认 False，多跳那次 recall（6930）不跑，
+        # 所以最后一次 recall 就是 6915 的主体召回，这里读到的是它的联想标记。
+        # 什么时候会坏：谁把 MULTIHOP_ON 改成 True，就必须给 6930 那次调用加
+        # assoc=False（recall 的 assoc 默认 True，见 5703）；否则那次会重算联想、
+        # 把 _last_assoc_ids 整体覆盖成 MULTIHOP_K=3 小召回那套 id，
+        # 这里读到的就不是主体召回的标记，正文里的【顺带想起】会标错。
         assoc_ids = getattr(self, "_last_assoc_ids", set())
 
         # 🔧 V5.7-C 实验（2026-11-08）：拓宽候选漏斗。
