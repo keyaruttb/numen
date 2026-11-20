@@ -331,6 +331,7 @@ GATE_WRITE_POST = frozenset((
     "/identity/set", "/injection", "/avatar", "/shutdown",
     "/narrative/write",   # 写我自己那一段叙事
     "/feedback", "/review/run", "/review/confirm",   # V9.0 反馈环
+    "/act",   # V9.4 立刻把意向做掉一次
 ))
 
 # 控制台下拉框里的候选音色（edge-tts 的常用中文音色）。
@@ -1790,6 +1791,15 @@ class Handler(BaseHTTPRequestHandler):
                 with m.lock:
                     rows = m.card.feedback.active_intentions()
                 return self._send(200, {"ok": True, "items": rows})
+            if method == "POST" and path == "/act":
+                # V9.4：立刻把「想做但还没做」的意向做掉一次（便宜的三件）。
+                # 平时由维护线程自动跑，这里给一个手动扳机，方便验收/排查。
+                try:
+                    with m.lock:
+                        r = m.card.act_on_intentions(now=time.time())
+                    return self._send(200, r)
+                except Exception as e:
+                    return self._send(500, {"ok": False, "err": str(e)[:200]})
             if method == "GET" and path == "/dream/pending":
                 # 梦境压缩（卡侧）：把还没消化的对话原文掏出来给外面的提炼器。
                 # 顺手带上死信：失败过的批次要让人看得见、能重试，不能静默烂在库里。
