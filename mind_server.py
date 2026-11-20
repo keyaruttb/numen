@@ -331,7 +331,8 @@ GATE_WRITE_POST = frozenset((
     "/identity/set", "/injection", "/avatar", "/shutdown",
     "/narrative/write",   # 写我自己那一段叙事
     "/feedback", "/review/run", "/review/confirm",   # V9.0 反馈环
-    "/act",   # V9.4 立刻把意向做掉一次
+    "/act",   # V9.4 立刻把意向做掉一次,
+    "/speech_policy",
 ))
 
 # 控制台下拉框里的候选音色（edge-tts 的常用中文音色）。
@@ -1800,6 +1801,25 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, r)
                 except Exception as e:
                     return self._send(500, {"ok": False, "err": str(e)[:200]})
+            if path == "/speech_policy":
+                import speech_policy as _sp
+                if method == "GET":
+                    _sp.ensure(m.card.db)
+                    return self._send(200, {"ok": True, "items": _sp.listing(m.card.db),
+                                            "stats": _sp.stats(m.card.db),
+                                            "log": _sp.log(m.card.db, limit=10)})
+                if method == "POST":
+                    b = self._body() or {}
+                    key = str(b.get("key") or "").strip()
+                    if not key:
+                        return self._send(400, {"ok": False, "error": "need_key"})
+                    with m.lock:
+                        out = _sp.set_policy(m.card.db, key, text=b.get("text"),
+                                             enabled=b.get("enabled"),
+                                             weight=b.get("weight"),
+                                             source=str(b.get("source") or "console"))
+                    return self._send(200, out)
+                return self._send(405, {"ok": False, "error": "method_not_allowed"})
             if method == "GET" and path == "/dream/pending":
                 # 梦境压缩（卡侧）：把还没消化的对话原文掏出来给外面的提炼器。
                 # 顺手带上死信：失败过的批次要让人看得见、能重试，不能静默烂在库里。

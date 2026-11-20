@@ -4344,6 +4344,11 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             _aff.ensure(self.db)
         except Exception as _ae:
             print("[card2] 评价印象建表失败: %s" % _ae)
+        try:
+            import speech_policy as _sp3
+            _sp3.ensure(self.db)
+        except Exception:
+            pass
 
     def inbox_pick(self, limit=40, hours=None, commit=False, min_score=None,
                    now=None):
@@ -7251,7 +7256,29 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 blk = "【我是谁】\n" + take(identity, q["identity"])
             out.append(blk)
             sections["identity"] = len(blk)
-        used = 0
+        # V9.5：表达策略层（SYNAPSE-1024 Speech Policy V1.0）
+        #    稳定的「怎么说话」放人格之后、长期印象之前 —— 它是缓存地基的一部分，
+        #    每轮不刷新；每轮变的分流标签走【此刻】尾巴，不能混进来。
+        _speech_len = 0
+        if os.environ.get("WHALE_SPEECH", "1") != "0":
+            try:
+                import speech_policy as _sp
+                _sptxt = _sp.render(self.db)
+            except Exception:
+                _sptxt = ""
+            # 预算：人格快占满时说话方式让位（test_card2「超大输入不崩」会盯着这条）
+            _room = int(TOKEN_BUDGET) - len(identity or "") - 400
+            _cap = max(0, min(int(os.environ.get("WHALE_SPEECH_CHARS", "700") or 700), _room))
+            if _cap < 80:
+                _sptxt = ""
+            if _sptxt:
+                _blk = "【说话方式】\n" + take(_sptxt, _cap)
+                out.append(_blk)
+                sections["speech"] = len(_blk)
+                self._speech_blk = _blk
+                self._speech_chars = len(_blk)
+                _speech_len = len(_blk)
+        used = _speech_len   # 说话方式也是预算的一部分，不能白吃
 
         # ② 长期印象格：长期池里「值得一直记得」的几条
         #    🔧 V4.1：不能只按权重排 —— 权重高的常是又长又啰嗦的随口话。
@@ -7978,11 +8005,32 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 sections["promise"] = len(_pb)
 
         state = self._state_line()
+        # V9.5：本轮分流（闲聊/办事/观望/绷躁）—— 只一行，跟着【此刻】走，不进稳定格
+        if os.environ.get("WHALE_SPEECH_MODE", "1") != "0":
+            try:
+                import speech_policy as _sp2
+                _mode = _sp2.round_mode(self.mood_pad(), query)
+                _mh = _sp2.mode_hint(_mode)
+                if _mh:
+                    state = (state + "\n" + _mh) if state else _mh
+                    sections["mode"] = len(_mh)
+            except Exception:
+                pass
         if state:
             out.append("【此刻】\n" + state)
             sections["state"] = len(state)
 
         text = "\n\n".join(out)
+        # V9.5：预算真爆了就让【说话方式】让位 —— 人格和证据优先于「怎么说话」的规则。
+        #    test_card2 的「超大输入不崩」就是拿 5000 字人格 + 50 行近上下文压这一条。
+        if len(text) > int(TOKEN_BUDGET):
+            _sb = getattr(self, "_speech_blk", "")
+            if _sb and sections.get("speech"):
+                try:
+                    text = text.replace(_sb + "\n\n", "", 1)
+                    sections.pop("speech", None)
+                except Exception:
+                    pass
         return {
             "text": text,
             "sections": sections,
