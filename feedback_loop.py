@@ -437,6 +437,46 @@ class FeedbackLoop(object):
         return steps
 
     # ---- V9.7 信号总线：七步结算改由事件派发（他的形态 + 我们的数学）---------
+    # ---- R3（2026-11-20）：降级要有痕迹，不能只 print 一行就过去了 ----------
+    def _mark_bus_disabled(self, reason):
+        """总线降级：内存 + meta 双记，/health 与 /feedback/stats 都能看见。"""
+        self._bus_disabled = True
+        self._bus_reason = str(reason)[:300]
+        ts = self._now()
+        try:
+            self._p("insert into meta(key,val) values(?,?) "
+                    "on conflict(key) do update set val=excluded.val",
+                    ("fb_bus_disabled", "1"))
+            self._p("insert into meta(key,val) values(?,?) "
+                    "on conflict(key) do update set val=excluded.val",
+                    ("fb_bus_disabled_ts", "%.3f" % ts))
+            self._p("insert into meta(key,val) values(?,?) "
+                    "on conflict(key) do update set val=excluded.val",
+                    ("fb_bus_disabled_reason", self._bus_reason))
+        except Exception:
+            pass
+
+    def bus_health(self):
+        """给 /health 用：总线到底还在不在。"""
+        off = bool(getattr(self, "_bus_disabled", False))
+        out = {"enabled": not off, "reason": getattr(self, "_bus_reason", "") if off else ""}
+        try:
+            row = self._row("select val from meta where key='fb_bus_disabled'")
+            if row and str(row["val"]) == "1":
+                out["enabled"] = False
+                ts = self._row("select val from meta where key='fb_bus_disabled_ts'")
+                rs = self._row("select val from meta where key='fb_bus_disabled_reason'")
+                out["since_ts"] = float(ts["val"]) if ts else None
+                out["reason"] = out["reason"] or (str(rs["val"]) if rs else "")
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_bus_obj", None) is not None:
+                out["adapters"] = len(getattr(self._bus_obj, "adapters", {}) or {})
+        except Exception:
+            pass
+        return out
+
     def _bus(self):
         """惰性建总线并注册适配器；拿不到 signalbus 就返回 None（自动退回顺序执行）。"""
         if getattr(self, "_bus_obj", None) is not None:
@@ -446,7 +486,7 @@ class FeedbackLoop(object):
         try:
             import signalbus as sb
         except Exception as e:
-            self._bus_disabled = True
+            self._mark_bus_disabled("import: %s" % e)
             print("[feedback] 总线不可用，退回顺序结算：%s" % e)
             return None
         bus = sb.Bus(card=self.card)
@@ -504,7 +544,7 @@ class FeedbackLoop(object):
             return steps
         except Exception as e:
             print("[feedback] 总线派发失败，退回顺序结算：%s" % e)
-            self._bus_disabled = True
+            self._mark_bus_disabled("dispatch: %s" % e)
             return self._apply_inline(row, r, sev, level, now)
 
     # ---- 适配器：签名统一 (sig) -> 返回值写进 payload["out_*"] --------------

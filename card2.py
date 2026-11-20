@@ -3175,26 +3175,79 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                         "age_h": round((time.time() - float(r["updated_ts"] or 0)) / 3600.0, 1)})
         return out
 
-    def _dream_regress_sample(self, limit=3):
-        """抽几条老记忆当回归样本：压完它们还得能在前 5 里找回来。"""
+    def _dream_regress_sample(self, limit=None):
+        """分层抽老记忆当回归样本：压完它们还得能在前 5 里找回来。
+
+        R6（2026-11-20）：原来只抽 3 条，代表性不足。改成分层：
+        先按 region 抽、再按 tier 抽、再按长度带抽，每层各 1 条，
+        凑够 n（默认 12，上限 20）后仍不够再随机补齐。
+        """
         import re as _re
-        out = []
+        import os as _os
         try:
-            rows = self.db.execute(
-                "SELECT id, raw FROM mem WHERE length(raw)>=14 AND tier NOT IN"
-                " ('core','core_mut') AND dead=0 ORDER BY RANDOM() LIMIT ?",
-                (int(limit),)).fetchall()
+            want = int(limit) if limit else int(_os.environ.get("WHALE_DREAM_REG_N", "12") or 12)
         except Exception:
-            return out
-        for r in rows:
-            raw = str(r["raw"] or "")
+            want = 12
+        want = max(3, min(20, want))
+
+        picked = {}          # mid -> raw
+        tried = []           # 每层一条的 SQL
+
+        regions = ("episode", "chatter", "fact", "study", "preference", "self")
+        bands = (("14", "60"), ("60", "200"), ("200", "99999"))
+        for rg in regions:
+            tried.append(("region=%s" % rg,
+                          "SELECT id, raw FROM mem WHERE length(raw)>=14 AND dead=0"
+                          " AND region=? ORDER BY RANDOM() LIMIT ?", (rg, 2)))
+        for tier in ("mid", "core", "core_mut", "keep"):
+            tried.append(("tier=%s" % tier,
+                          "SELECT id, raw FROM mem WHERE length(raw)>=14 AND dead=0"
+                          " AND tier=? ORDER BY RANDOM() LIMIT ?", (tier, 1)))
+        for lo, hi in bands:
+            tried.append(("len %s-%s" % (lo, hi),
+                          "SELECT id, raw FROM mem WHERE dead=0 AND length(raw) BETWEEN ? AND ?"
+                          " ORDER BY RANDOM() LIMIT ?", (int(lo), int(hi), 2)))
+
+        for _round in range(3):
+            if len(picked) >= want:
+                break
+            for _name, sql, args in tried:
+                if len(picked) >= want:
+                    break
+                try:
+                    rows = self.db.execute(sql, args).fetchall()
+                except Exception:
+                    continue
+                for r in rows:
+                    if len(picked) >= want:
+                        break
+                    mid = int(r["id"])
+                    if mid in picked:
+                        continue
+                    picked[mid] = str(r["raw"] or "")
+
+        if len(picked) < want:
+            try:
+                rows = self.db.execute(
+                    "SELECT id, raw FROM mem WHERE length(raw)>=14 AND dead=0"
+                    " ORDER BY RANDOM() LIMIT ?", (want * 3,)).fetchall()
+                for r in rows:
+                    if len(picked) >= want:
+                        break
+                    picked.setdefault(int(r["id"]), str(r["raw"] or ""))
+            except Exception:
+                pass
+
+        out = []
+        for mid, raw in picked.items():
             q = None
             for tok in _re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{6,12}", raw):
                 if len(tok) >= 8:
                     q = tok
                     break
-            out.append((int(r["id"]), q or raw[:12]))
+            out.append((mid, q or raw[:12]))
         return out
+
 
     def _dream_regress_check(self, sample, top_k=5):
         """返回（命中数，丢掉的样本）。"""
@@ -3302,7 +3355,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         except Exception as e:
             soft_fail("dream_batch", e, "梦批次登记失败（仍继续写，只是丢了幂等）")
 
-        _reg_sample = self._dream_regress_sample(3)
+        _reg_sample = self._dream_regress_sample()
         _reg_base_hit = self._dream_regress_check(_reg_sample)[0] if _reg_sample else 0
         written = []
         try:

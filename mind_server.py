@@ -1107,6 +1107,17 @@ def api_token(mind):
     return t
 
 
+def _bus_health(card):
+    """读卡上反馈环的总线状态；没有反馈环就返回 None（不算错）。"""
+    try:
+        fb = getattr(card, "feedback", None)
+        if fb is None or not hasattr(fb, "bus_health"):
+            return None
+        return fb.bus_health()
+    except Exception as e:
+        return {"enabled": None, "error": str(e)[:120]}
+
+
 def _lease_payload(mind):
     """给 /health 的写者租约现场（V7 P0-4）。只描述，不判断。
 
@@ -1169,6 +1180,7 @@ class Handler(BaseHTTPRequestHandler):
         现取的 8 位十六进制，出现在 stderr 慢日志、错误回包、以及 /status
         的 recent_errors 里 —— 三处同一个 id 才叫「可追」。
         """
+        self._status = code
         if isinstance(obj, dict):
             obj.setdefault("request_id", getattr(self, "rid", ""))
             _t0 = getattr(self, "req_t0", None)
@@ -1292,6 +1304,9 @@ class Handler(BaseHTTPRequestHandler):
                         "blocked_paths_n": len(
                             getattr(m, "gate_blocked", {}) or {}),
                     },
+                    # R3（2026-11-20）：信号总线还在不在。降级后 enabled=False，
+                    # 带 since_ts 与 reason —— 以前这行只出现在日志里，没人看得见。
+                    "bus": _bus_health(m.card),
                     # 语义层只说三件事：模型多少维、卡里多数多少维、能用的占几成。
                     # 「覆盖率」那个数字会骗人 —— 换过模型的卡里，带着向量却
                     # 用不上的老条目也能算成 100%。所以这里报 usable_ratio。
@@ -1923,6 +1938,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, snap)
                 except Exception as _e:
                     return self._send(500, {"ok": False, "error": str(_e)})
+            if path in ("/audit", "/audit/stats"):
+                import guard as _gd2
+                _gd2.ensure(m.card.db)
+                if path == "/audit/stats":
+                    return self._send(200, {"ok": True, "stats": _gd2.stats(m.card.db)})
+                _lim = 50
+                return self._send(200, {"ok": True,
+                                        "items": _gd2.recent(m.card.db, limit=_lim),
+                                        "stats": _gd2.stats(m.card.db)})
             if path.startswith("/gov"):
                 import governance as _gv
                 if method == "GET" and path == "/gov/log":
@@ -3413,6 +3437,24 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 # 观测自己坏了也不能影响请求：这里不留空吞，落个标记位给 /perf 看
                 self._perf_broke = True
+        # R4（2026-11-20）：限流。写接口 120/min、读 600/min；超了直接 429，
+        # 别让轮询脚本把写锁拖死。它不替代 token 闸（那是「你是谁」），只管「你来多快」。
+        try:
+            import guard as _gd0
+            _ip0 = (self.client_address[0] if getattr(self, "client_address", None) else "-")
+            _okr0, _wait0 = _gd0.check(_ip0, "write" if method == "POST" else "read")
+            if not _okr0:
+                self._status = 429
+                _r0 = self._send(429, {"ok": False, "error": "rate_limited",
+                                       "detail": "请求太密，%d 秒后再来" % _wait0})
+                try:
+                    _gd0.note(_ip0, getattr(self, "last_path", ""), 429, 0,
+                              conn=getattr(Handler.mind.card, "db", None))
+                except Exception:
+                    pass
+                return _r0
+        except Exception:
+            pass
         try:
             self._route(method)
         finally:
@@ -3424,6 +3466,15 @@ class Handler(BaseHTTPRequestHandler):
                     rec = None
             dt = time.time() - t0
             self.req_ms = dt * 1000.0
+            # R4：审计（时间 / IP / 方法路径 / 状态码 / 耗时）。攒够再落盘，不拖慢回包。
+            try:
+                import guard as _gd1
+                _ip1 = (self.client_address[0] if getattr(self, "client_address", None) else "-")
+                _gd1.note(_ip1, getattr(self, "last_path", ""),
+                          getattr(self, "_status", 0), self.req_ms,
+                          conn=getattr(Handler.mind.card, "db", None))
+            except Exception:
+                pass
             # 记进环形缓冲：/health 的 p50/p95 就从这儿算（V7 第 14 件补齐）。
             # 只留 (分组, 秒)，不留请求体 —— 这里不能碰任何业务数据。
             _lat_add(path, dt)
@@ -4785,6 +4836,15 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--db", default=DEFAULT_DB)
     a = ap.parse_args(argv)
+    # R4（2026-11-20）：安全边界。默认只绑本机；要对外必须显式设 WHALE_ALLOW_NONLOCAL=1，
+    # 否则拒绝启动 —— 「绑 0.0.0.0 忘了关」是这类服务最常见的事故。
+    if str(getattr(a, "host", "127.0.0.1")) not in _LOCAL_HOSTS:
+        if os.environ.get("WHALE_ALLOW_NONLOCAL") != "1":
+            print("[mind] 拒绝启动：--host %s 不是本机地址。确实要对外暴露，"
+                  "请显式设 WHALE_ALLOW_NONLOCAL=1。" % a.host, file=sys.stderr)
+            return 2
+        print("[mind] 警告：绑定 %s（非本机），限流 + token 闸是唯一防线。" % a.host,
+              file=sys.stderr)
 
     if not os.path.exists(a.db):
         print("[mind] 找不到卡：%s" % os.path.abspath(a.db), file=sys.stderr)
