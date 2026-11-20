@@ -350,7 +350,15 @@ class MixStore:
             try:
                 self.synapse.add_semantic_edges([mid], [_emb])
             except Exception as _se:
+                # 补边失败不再只打印一句：进 outbox，退避重试，真不行进死信。
                 print("[card2] 语义边补建失败: %s" % _se)
+                try:
+                    import outbox as _ob
+                    _ob.ensure(self.db)
+                    _ob.enqueue(self.db, "synapse_edges", mid,
+                                payload={"mid": int(mid)}, now=self.clock.now())
+                except Exception as _oe:
+                    soft_fail("outbox_synapse", _oe, "连 outbox 都没记上")
         # 共现：这条和「上一条」连一笔（同一个人优先，没有就按全局）
         try:
             _au2 = str(about_uid or "")

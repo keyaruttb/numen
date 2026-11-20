@@ -1838,6 +1838,24 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, {"ok": True, "item": out,
                                             "snapshot": _sp.snapshot(m.card.db)})
                 return self._send(405, {"ok": False, "error": "method_not_allowed"})
+            if path in ("/outbox", "/outbox/stats"):
+                import outbox as _ob
+                with m.lock:
+                    _ob.ensure(m.card.db)
+                    _st = _ob.stats(m.card.db)
+                    if path == "/outbox/stats":
+                        self._send(200, {"ok": True, "stats": _st})
+                        return
+                    _q = urlparse(self.path).query
+                    _state = None
+                    for _kv in (_q or "").split("&"):
+                        if _kv.startswith("state="):
+                            _state = _kv[6:]
+                    _items = _ob.listing(m.card.db, _state, 20)
+                self._send(200, {"ok": True, "stats": _st, "items": _items,
+                                 "max_attempts": _ob.MAX_ATTEMPTS})
+                return
+
             if path.startswith("/gov"):
                 import governance as _gv
                 if method == "GET" and path == "/gov/log":
@@ -4351,11 +4369,13 @@ def _start_maintenance(mind):
     except Exception:
         lrn_sec = 1800.0
     try:
+        outbox_sec = float(os.environ.get("WHALE_OUTBOX_SEC", "300") or 0)
         act_sec = float(os.environ.get("WHALE_ACT_SEC", "1200") or 0)
     except Exception:
         act_sec = 1200.0
 
-    last = {"act": 0.0, "fade": 0.0, "habits": 0.0, "worklog": 0.0, "ckpt": 0.0, "learn": 0.0}
+    last = {"act": 0.0, "fade": 0.0, "habits": 0.0, "worklog": 0.0,
+            "ckpt": 0.0, "learn": 0.0, "affect": 0.0, "outbox": 0.0}
     # 线程起来就先记一次心跳：否则 /health 在第一个周期内会误报
     # maintenance_never_ran（明明刚启动，还没来得及跳第一跳）。
     mind._maint_last = time.time()
@@ -4598,6 +4618,24 @@ def _start_maintenance(mind):
                             pass
                 except Exception as e:
                     print("[mind] 意向行动失败: %s" % e)
+
+            # 2.7) 写入 outbox（V9.7.4）：派生没做成的，在这里退避重试。
+            #     只碰 queued 且到点的，一次最多 5 条，做不成就再等，超限进死信。
+            if outbox_sec > 0 and now - last.get("outbox", 0) >= outbox_sec:
+                try:
+                    with mind.lock:
+                        _orr = mind.card.replay_outbox(limit=5, now=now)
+                    last["outbox"] = now
+                    _ok = [x for x in (_orr or []) if x.get("result") == "ok"]
+                    _bad = [x for x in (_orr or []) if x.get("result") != "ok"]
+                    if _ok:
+                        print("[mind] outbox 补做 %d 条：%s" % (len(_ok), "；".join(
+                            "%s#%s" % (x["kind"], x["ref"]) for x in _ok)))
+                    if _bad:
+                        print("[mind] outbox 仍失败 %d 条：%s" % (len(_bad), "；".join(
+                            "%s#%s(%s)" % (x["kind"], x["ref"], x["result"]) for x in _bad)))
+                except Exception as e:
+                    print("[mind] outbox 节拍失败: %s" % e)
 
     t = threading.Thread(target=loop, name="maintenance", daemon=True)
     mind._maint_thread = t

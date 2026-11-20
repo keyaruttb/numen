@@ -3059,6 +3059,39 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         return {"n": len(items), "chars": chars, "min_turns": DREAM_MIN_TURNS,
                 "idle_hours": DREAM_IDLE_HOURS, "items": items}
 
+    def replay_outbox(self, limit=5, now=None):
+        """把写记忆时没做成的派生再试一遍（幂等，失败退避，超限进死信）。"""
+        import outbox as _ob
+        _ob.ensure(self.db)
+        rows = _ob.due(self.db, now=now, limit=limit)
+        out = []
+        for r in rows:
+            _ob.claim(self.db, r["id"], now=now)
+            kind = str(r["kind"] or "")
+            try:
+                mid = int(r["ref_id"] or 0)
+                if kind == "synapse_edges":
+                    row = self.db.execute("SELECT raw FROM mem WHERE id=?", (mid,)).fetchone()
+                    if not row:
+                        raise RuntimeError("mem_missing:%s" % mid)
+                    import cardmix_store as _ms
+                    from cardtext import embed_text_for as _etf
+                    _raw = str(row["raw"] or "")
+                    if not self.sem_ready():
+                        raise RuntimeError("sem_not_ready")
+                    _blob = self.semantic.encode(_etf(_raw, "user", _raw[:40]))
+                    self.synapse.add_semantic_edges([mid], [_blob])
+                else:
+                    raise RuntimeError("unknown_kind:%s" % kind)
+                _ob.done(self.db, r["id"], now=now)
+                out.append({"kind": kind, "ref": mid, "result": "ok"})
+            except Exception as e:
+                dead = _ob.fail(self.db, r["id"], "%s: %s" % (type(e).__name__, e), now=now)
+                out.append({"kind": kind, "ref": r["ref_id"],
+                            "result": "dead" if dead else "retry",
+                            "error": "%s: %s" % (type(e).__name__, e)})
+        return out
+
     def dream_due(self, now=None):
         """够不够格做一次梦：轮数够 or 空闲够久，且确实有待消化的原文。"""
         now = self.clock.now() if now is None else float(now)
@@ -4441,7 +4474,9 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         try:
             # 2026-11-20 V9.7.2：治理判定台账（gov_decision）。
             import governance as _gv
+            import outbox as _ob0
             _gv.ensure(self.db)
+            _ob0.ensure(self.db)
         except Exception:
             pass
 
