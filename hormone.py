@@ -357,6 +357,10 @@ def describe(hs):
     }
 
 
+SOFT_HI = 0.85      # 底色软上限：真人极少长期贴顶
+SOFT_LO = 0.15      # 底色软下限
+
+
 def apply_r(hs, r, scale=0.22, severity=0.0):
     """V9.0：按奖励标量扰动四慢激素（四键 0..1，与 hormone.H_BASE 同刻度）.
 
@@ -382,5 +386,13 @@ def apply_r(hs, r, scale=0.22, severity=0.0):
             # 2026-11-20（用户 m07166/m07214）：带余量推进 —— 越靠近顶/底动得越少，
             #   不会连续几笔就粘死在 1.0 / 0.0 上（否则后面再夸再骂都推不动）。
             room = (1.0 - cur) if step > 0 else cur
-            h[k] = _clamp(cur + step * (0.25 + 0.75 * room), 0.0, 1.0)
+            cur = _clamp(cur + step * (0.25 + 0.75 * room), 0.0, 1.0)
+            # 2026-11-20（用户 m07314）：底色往中间轻轻拉一点 —— 真人不会长期贴顶/贴底。
+            #   超出软带的部分只收 30%，不是硬夹：所以"极端情绪"还能短暂出现，
+            #   但不会连着几天卡在 1.00 / 0.00 上，看着像个人。
+            if cur > SOFT_HI:
+                cur = SOFT_HI + (cur - SOFT_HI) * 0.7
+            elif cur < SOFT_LO:
+                cur = SOFT_LO - (SOFT_LO - cur) * 0.7
+            h[k] = _clamp(cur, 0.0, 1.0)
     return h

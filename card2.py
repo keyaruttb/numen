@@ -384,6 +384,10 @@ TIER_CORE_MUTABLE = "core_mutable"   # 会变的底色
 TIER_CORE_TAG = "core_tag"           # 人物角色标签
 TIER_CORE_FIXED = "core_fixed"       # 骨头
 CORE_TIERS = (TIER_CORE_MUTABLE, TIER_CORE_TAG, TIER_CORE_FIXED)
+TIER_PROTECTED = "keep"     # 受保护：不吃「久不访问」的侵蚀/下沉
+TIER_EPHEMERAL = "flash"    # 短暂：超过 FLASH_TTL 直接降级成空壳
+RETENTION_TIERS = CORE_TIERS + (TIER_PROTECTED, TIER_EPHEMERAL)
+FLASH_TTL = 7 * 86400.0     # 短暂档的寿命（秒）
 
 # 中期 → 长期：原来只看权重 0.60，太松（"当时很激动"就能进）。
 # 现在要"验票"：权重 ≥ 0.80，并且之后还被想起来过。
@@ -3576,6 +3580,9 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             # 削成空壳会让它连"我曾经讨厌香菜"都说不完整。
             if r["tier"] in CORE_TIERS:
                 continue
+            # P1-1（2026-11-20）：keep 档只允许被"改写/用户删"，不许被"久了没人提"削掉。
+            if r["tier"] == TIER_PROTECTED:
+                continue
             wn = wn_row(r, now)
             if wn >= ERASE_W_FLOOR:
                 continue
@@ -3603,6 +3610,16 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 # 最后一刀：整条消失（先登记台账，删了就算不出哈希了）
                 self._forget_row(c, r["id"], "主干侵蚀到头")
                 events.append((r["id"], "erased", None))
+
+        # 4b) 短暂档（P1-1）：到点就确定性降级，不留「半扇」空壳在热区。
+        for r in c.execute("SELECT * FROM mem WHERE tier=?", (TIER_EPHEMERAL,)).fetchall():
+            if r["pool"] in (POOL_LONG, POOL_ARCHIVE, POOL_DEEP):
+                continue
+            if (now - float(r["t_anchor"] or now)) < FLASH_TTL:
+                continue
+            c.execute("UPDATE mem SET erase_stage=2, verb='', obj='', w=?, t_anchor=?"
+                      " WHERE id=?", (HUSK_W, now, r["id"]))
+            events.append((r["id"], "flash_expired", round(HUSK_W, 4)))
 
         # 5) 五空间下沉（T5-1 / V5.0 §12.5）
         #    长期 → 潜意识 → 深层痕迹 → TRACE 计数。
@@ -3888,7 +3905,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 (POOL_LONG, budget)).fetchall()
             for r in rows:
                 # 底色层不下沉：它已经是最后一站了（改写在 supersede 里做）
-                if r["tier"] in CORE_TIERS:
+                if r["tier"] in CORE_TIERS or r["tier"] == TIER_PROTECTED:
                     continue
                 age = now - r["t_anchor"]
                 if age < AGE_EXIT_LONG:
@@ -4462,6 +4479,17 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         return {"ok": True, "mid": mid}
 
     def _forget_row(self, c, mid, reason):
+        # P1-1（2026-11-20）：keep 档不吃「自动忘记」这一刀。
+        # 只认久不访问/淡到看不见/小池到期这几类理由；用户删、合并照常。
+        try:
+            _r1 = c.execute('SELECT tier FROM mem WHERE id=?', (int(mid),)).fetchone()
+            if _r1 is not None:
+                _t1 = str(_r1[0] or '')
+                _auto = reason in ('短期小池到期，还是没被再想起', '中期小池到期，自然淡出', '主干侵蚀到头', '清晰度归零回收')
+                if _auto and (_t1 in CORE_TIERS or _t1 == TIER_PROTECTED):
+                    return False
+        except Exception:
+            pass
         """删一条记忆的**唯一出口**：先给它登记台账，再连细节一起删。
 
         以前四处各删各的（侵蚀、合并、沉淀、回收），删完就没了痕迹：
@@ -4843,7 +4871,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
     def set_tier(self, mid, tier, kind=None, subject_key=None,
                  valid_until=None):
         """把一条记忆搬到某一层。core_* 会被抬到 long 池并不再衰减。"""
-        if tier not in CORE_TIERS and tier not in (TIER_MID, TIER_SHORT):
+        if tier not in RETENTION_TIERS and tier not in (TIER_MID, TIER_SHORT):
             raise ValueError("不认识的层：%r" % (tier,))
         c = self.db.cursor()
         now = self.clock.now()

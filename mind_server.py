@@ -1838,6 +1838,33 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, {"ok": True, "item": out,
                                             "snapshot": _sp.snapshot(m.card.db)})
                 return self._send(405, {"ok": False, "error": "method_not_allowed"})
+            if path in ("/retention", "/retention/set"):
+                import card2 as _c2
+                if method == "GET":
+                    with m.lock:
+                        rows = m.card.db.execute(
+                            "SELECT tier, COUNT(*) n FROM mem GROUP BY tier").fetchall()
+                        cnt = {str(r[0]): int(r[1]) for r in rows}
+                    self._send(200, {"ok": True, "tiers": cnt,
+                                     "core": list(_c2.CORE_TIERS),
+                                     "protected": _c2.TIER_PROTECTED,
+                                     "ephemeral": _c2.TIER_EPHEMERAL,
+                                     "flash_ttl_h": round(_c2.FLASH_TTL / 3600.0, 1)})
+                    return
+                body = self._json_body()
+                mid = int(body.get("mid") or 0)
+                tier = str(body.get("tier") or "").strip()
+                if not mid or not tier:
+                    self._send(400, {"ok": False, "error": "need mid & tier"})
+                    return
+                with m.lock:
+                    try:
+                        m.card.set_tier(mid, tier)
+                    except Exception as e:
+                        self._send(400, {"ok": False, "error": str(e)})
+                        return
+                self._send(200, {"ok": True, "mid": mid, "tier": tier})
+                return
             if method == "GET" and path == "/dream/pending":
                 # 梦境压缩（卡侧）：把还没消化的对话原文掏出来给外面的提炼器。
                 # 顺手带上死信：失败过的批次要让人看得见、能重试，不能静默烂在库里。
