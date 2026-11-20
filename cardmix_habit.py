@@ -227,6 +227,33 @@ class MixHabit(object):
                 continue
         return out[:int(limit)]
 
+
+    # ---- 表达策略层（V9.6，SYNAPSE-1024 Speech Policy V1.0）----------------
+    def speech_policy_lines(self, max_chars=None):
+        """稳定格条文（已排序、已截断）。空列表 = 这一格省略。"""
+        try:
+            import speech_policy as sp
+            if max_chars is None:
+                return sp.block_lines(self.db)
+            return sp.block_lines(self.db, max_chars=int(max_chars))
+        except Exception:
+            return []
+
+    def speech_policy_snapshot(self):
+        try:
+            import speech_policy as sp
+            return sp.snapshot(self.db)
+        except Exception:
+            return {}
+
+    def speech_round_hint(self, query="", scene=None, pad=None, oxy=None, valence=None):
+        """本轮倾向：分流标签 + 称谓距离。返回 {"tag":..., "lines":[...]}。"""
+        try:
+            import speech_policy as sp
+            return sp.round_hint(query, pad=pad, scene=scene, oxy=oxy, valence=valence)
+        except Exception:
+            return {"tag": "", "lines": []}
+
     def _affect_uid(self):
         for attr in ("_affect_uid_cache", "about_uid", "_about_uid"):
             v = getattr(self, attr, None)

@@ -332,6 +332,7 @@ GATE_WRITE_POST = frozenset((
     "/narrative/write",   # 写我自己那一段叙事
     "/feedback", "/review/run", "/review/confirm",   # V9.0 反馈环
     "/act",   # V9.4 立刻把意向做掉一次,
+    "/speech_policy/update",
     "/speech_policy",
 ))
 
@@ -1801,24 +1802,41 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, r)
                 except Exception as e:
                     return self._send(500, {"ok": False, "err": str(e)[:200]})
-            if path == "/speech_policy":
+            if path in ("/speech_policy", "/speech_policy/snapshot", "/speech_policy/update"):
                 import speech_policy as _sp
+                _sp.ensure(m.card.db)
                 if method == "GET":
-                    _sp.ensure(m.card.db)
-                    return self._send(200, {"ok": True, "items": _sp.listing(m.card.db),
-                                            "stats": _sp.stats(m.card.db),
-                                            "log": _sp.log(m.card.db, limit=10)})
+                    if path == "/speech_policy/snapshot":
+                        return self._send(200, {"ok": True, "snapshot": _sp.snapshot(m.card.db)})
+                    _logs = []
+                    try:
+                        _logs = [dict(zip(("id", "key", "ts", "source"),
+                                          tuple(r)[:4]))
+                                 for r in m.card.db.execute(
+                                     "SELECT id, key, ts, source FROM speech_policy_log"
+                                     " ORDER BY id DESC LIMIT 10").fetchall()]
+                    except Exception:
+                        _logs = []
+                    return self._send(200, {"ok": True, "items": _sp.list_items(m.card.db),
+                                            "snapshot": _sp.snapshot(m.card.db),
+                                            "log": _logs,
+                                            "block_lines": _sp.block_lines(m.card.db)})
                 if method == "POST":
                     b = self._body() or {}
                     key = str(b.get("key") or "").strip()
                     if not key:
-                        return self._send(400, {"ok": False, "error": "need_key"})
+                        return self._send(400, {"ok": False, "error": "empty_key"})
+                    if key not in _sp.POLICY_KEYS:
+                        return self._send(400, {"ok": False, "error": "bad_key"})
                     with m.lock:
-                        out = _sp.set_policy(m.card.db, key, text=b.get("text"),
-                                             enabled=b.get("enabled"),
-                                             weight=b.get("weight"),
-                                             source=str(b.get("source") or "console"))
-                    return self._send(200, out)
+                        out = _sp.upsert(m.card.db, key, text=b.get("text"),
+                                         enabled=b.get("enabled"),
+                                         weight=b.get("weight"),
+                                         source=str(b.get("source") or "console"))
+                    if out is None:
+                        return self._send(400, {"ok": False, "error": "bad_key"})
+                    return self._send(200, {"ok": True, "item": out,
+                                            "snapshot": _sp.snapshot(m.card.db)})
                 return self._send(405, {"ok": False, "error": "method_not_allowed"})
             if method == "GET" and path == "/dream/pending":
                 # 梦境压缩（卡侧）：把还没消化的对话原文掏出来给外面的提炼器。
