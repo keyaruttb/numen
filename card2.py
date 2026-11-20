@@ -4508,6 +4508,9 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             import outbox as _ob0
             _gv.ensure(self.db)
             _ob0.ensure(self.db)
+            # 2026-11-20 V9.8.1：轮次生命周期（评审 R2）。
+            import turn as _tn
+            _tn.ensure(self.db)
         except Exception:
             pass
 

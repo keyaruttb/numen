@@ -332,7 +332,7 @@ GATE_WRITE_POST = frozenset((
     "/narrative/write",   # 写我自己那一段叙事
     "/feedback", "/review/run", "/review/confirm",   # V9.0 反馈环
     "/act",   # V9.4 立刻把意向做掉一次,
-    "/gov/decide", "/speech_policy/update",
+    "/gov/decide", "/gov/mark", "/speech_policy/update",
     "/hormone/feedback",
     "/speech_policy",
 ))
@@ -833,7 +833,7 @@ class Mind(object):
                 "last_ms": self._wq_stats["last_ms"],
                 "last_rid": self._wq_stats["last_rid"]}
 
-    def report(self, user_message, reply="", ts=None, source="chat"):
+    def report(self, user_message, reply="", ts=None, source="chat", turn_id=None):
         with self.lock:
             if self.writer_lock:
                 # 卡被另一台机器占着：宁可报错，也不写第二条链
@@ -844,6 +844,19 @@ class Mind(object):
                 raise timeline_mod.ForeignWriter(
                     "这张卡正被另一台机器用（%s），我这边只读" % self.writer_lock)
             self.flow_time()
+            # V9.8.1（评审 R2）：这一轮先开个号。同一个 turn_id 再来一次，只回状态，不写第二遍。
+            # 为什么必须在这儿：重试、客户端超时重发、桥层补发，都会把同一句话送来两次，
+            # 以前就是两条 mem、两条 feedback、两段原文 —— 等于她听我说了两遍。
+            import turn as _turn_mod
+            _turn_mod.ensure(self.card.db)
+            _tid = str(turn_id or "").strip()
+            if not _tid:
+                import uuid as _uuid
+                _tid = _uuid.uuid4().hex[:16]
+            _tb = _turn_mod.begin(self.card.db, _tid, source=source, now=ts)
+            if _tb.get("dup"):
+                return {"mem_id": 0, "reply_mem_id": 0, "turn_id": _tid,
+                        "duplicate": True, "state": _tb.get("state")}
             # 他说的话：进短期记忆池（mem），也进原文表（dialogue）。
             # 为什么必须进 mem 而不是只存原文：
             #   原文表不参与召回。只存原文的话，「三天内几乎不遗忘」这条
@@ -900,7 +913,12 @@ class Mind(object):
                                             note=str(reply or "")[:80], source="explicit")
                 except Exception as e:
                     print("[mind] 反馈登记失败：%s" % e, file=sys.stderr)
-            return {"mem_id": mid, "reply_mem_id": reply_mid}
+            try:
+                _turn_mod.finish(self.card.db, _tid, user_mid=mid,
+                                 reply_mid=reply_mid or 0, state="done")
+            except Exception as _te:
+                print("[mind] 轮次收尾失败：%s" % _te, file=sys.stderr)
+            return {"mem_id": mid, "reply_mem_id": reply_mid, "turn_id": _tid}
 
     # ---- 短期对话原文：放卡里，不放模型那边 ----
     # 为什么非要在卡里：
@@ -1928,11 +1946,40 @@ class Handler(BaseHTTPRequestHandler):
                                            str(body.get("action") or ""),
                                            reason=str(body.get("reason") or ""),
                                            source=str(body.get("source") or "manual"),
-                                           conflicts=int(body.get("conflicts") or 0))
+                                           conflicts=int(body.get("conflicts") or 0),
+                                           exec_state=(body.get("exec_state") or None))
                     except Exception as e:
                         self._send(400, {"ok": False, "error": str(e)})
                         return
                     self._send(200, d)
+                    return
+                if method == "POST" and path == "/gov/mark":
+                    body = self._body()
+                    try:
+                        with m.lock:
+                            r = _gv.mark(m.card.db, int(body.get("id") or 0),
+                                         str(body.get("exec_state") or ""),
+                                         note=str(body.get("note") or ""))
+                    except Exception as e:
+                        self._send(400, {"ok": False, "error": str(e)})
+                        return
+                    self._send(200 if r.get("ok") else 404, r)
+                    return
+            if path.startswith("/turn"):
+                import turn as _trn
+                if method == "GET" and path in ("/turn/stats", "/turn/log"):
+                    with m.lock:
+                        st = _trn.stats(m.card.db)
+                    self._send(200, dict({"ok": True}, **st))
+                    return
+                if method == "GET" and path.startswith("/turn/"):
+                    tid = path[len("/turn/"):].strip()
+                    with m.lock:
+                        row = _trn.get(m.card.db, tid)
+                    if not row:
+                        self._send(404, {"ok": False, "error": "no_such_turn"})
+                        return
+                    self._send(200, {"ok": True, "turn": row})
                     return
             if path in ("/retention", "/retention/set"):
                 import card2 as _c2
@@ -2578,7 +2625,8 @@ class Handler(BaseHTTPRequestHandler):
                         job = m.wq_submit(
                             lambda: m.report(um, body.get("reply") or "",
                                              body.get("ts"),
-                                             source=body.get("source") or "chat"))
+                                             source=body.get("source") or "chat",
+                                             turn_id=body.get("turn_id")))
                         if job is None:
                             return self._fail(429, "queue_full",
                                               "写队列满了（上限 %d），等下一轮"

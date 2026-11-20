@@ -372,17 +372,30 @@ class FeedbackLoop(object):
             if not sig:
                 return {"settled": False, "why": "no_signal"}
             row = self.db.execute(
-                "SELECT id FROM feedback WHERE kind='self_utterance' AND status='open'"
+                "SELECT id, mem_id FROM feedback WHERE kind='self_utterance' AND status='open'"
                 " ORDER BY ts_action DESC, id DESC LIMIT 1").fetchone()
             if not row:
                 return {"settled": False, "why": "no_open"}
             fb_id = int(row["id"])
+            try:
+                _mem_id = int(row["mem_id"] or 0)
+            except Exception:
+                _mem_id = 0
             note = "反应：%s（%s）" % (sig.get("label"), str(text)[:24])
             args = {k: v for k, v in sig.items() if k in
                     ("approval", "correction", "reject")}
             out = self.settle(fb_id, note=note, trust_ok=True, now=now, **args)
+            # V9.8.1（R2）：结完账把对应那一轮标 settled —— 这样「哪一轮被评价过」有账可查，
+            # 不再是「feedback 里最近一条 open」的猜测。
+            try:
+                import turn as _tm
+                _tm.ensure(self.db)
+                _tm.settle_by_mem(self.db, _mem_id, now=now)
+            except Exception as _te:
+                print("[feedback] 轮次标注失败：%s" % _te)
             return {"settled": True, "fb_id": fb_id, "label": sig.get("label"),
-                    "r": (out or {}).get("r"), "bucket": (out or {}).get("bucket")}
+                    "r": (out or {}).get("r"), "bucket": (out or {}).get("bucket"),
+                    "mem_id": _mem_id}
         except Exception as e:
             return {"settled": False, "why": "%s: %s" % (type(e).__name__, e)}
 
