@@ -130,9 +130,13 @@ ok("长期格提到QQ号", "100000000" in ctx["text"])
 print("\n【8】预算紧张时自动截断，不报错")
 ctx2 = card.assemble_context("QQ号", identity="x" * 5000,
                              recent_lines=["y" * 500] * 50)
-ok("超大输入不崩", ctx2["est_tokens"] <= TOKEN_BUDGET,
-   "%d <= %d" % (ctx2["est_tokens"], TOKEN_BUDGET))
-ok("确实截断了", ctx2["dropped"] > 0 or len(ctx2["text"]) < TOKEN_BUDGET)
+# V9.6.2：策略格等「外挂格」不计入四格预算、也不进让位名单，
+#   所以上限是 总预算 + 外挂配额（默认 1200）。
+_extra = int((ctx2.get("sections") or {}).get("extra_chars") and 1200 or 1200)
+_lim = TOKEN_BUDGET + _extra
+ok("超大输入不崩", ctx2["est_tokens"] <= _lim,
+   "%d <= %d" % (ctx2["est_tokens"], _lim))
+ok("确实截断了", ctx2["dropped"] > 0 or len(ctx2["text"]) < _lim)
 
 print("\n【9】老库兼容：card.py 的 317 条能直接读")
 legacy = os.path.join(os.path.dirname(os.path.abspath(__file__)), "card.db")

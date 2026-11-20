@@ -7196,6 +7196,20 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         # 2026-11-20：本轮真实总预算（控制台 BUDGET 可调，现 13500）。
         #   末尾的让位闸必须用它，不能用写死的 TOKEN_BUDGET，否则线上永远「超预算」。
         _total_cap = int(plan.get("total") or budget or TOKEN_BUDGET or 0)
+        # 2026-11-20（用户 m07166）：重要格做「独立外挂」，不计入四格、也不受总预算挤占。
+        #   排序规则、表达策略这类「不给人设加戏、但每轮都该在」的格子走这里。
+        #   调法：runtime_config 里 EXTRA_CHARS，或 env WHALE_EXTRA_CHARS；设 0 退回旧行为。
+        try:
+            _extra_cap = int(os.environ.get("WHALE_EXTRA_CHARS", "") or 0)
+        except Exception:
+            _extra_cap = 0
+        if not _extra_cap:
+            try:
+                _extra_cap = int(self._meta_get("EXTRA_CHARS", 1200) or 1200)
+            except Exception:
+                _extra_cap = 1200
+        _extra_cap = max(0, min(4000, int(_extra_cap)))
+        _extra_used = 0
         # ---- 证据段硬配额（实验臂，2026-11-19）----------------------------
         # 默认 0.35（2026-11-19 实测：417 题有证据轮 139/305=45.6% → 144/305=47.2%；
         # 真卡 23 条尺子不变 62.5/75/100；0.45 反而回落到 46.8%，所以停在 0.35）。
@@ -8040,12 +8054,18 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             ("【期待】", "expect"),
             ("【事实】", "fact"),
             ("【欲望】", "motiv"),
-            ("【这一轮】", "round_hint"),
-            ("【说话方式】", "speech_policy"),
+            # 【这一轮】【说话方式】是外挂格（_extra_cap），永不进让位名单。
         )
-        if len(text) > int(_total_cap):
+        try:
+            _extra_used = len(getattr(self, "_speech_blk", "") or "") + len(getattr(self, "_round_blk", "") or "")
+            if _extra_used:
+                sections["extra_chars"] = _extra_used
+        except Exception:
+            pass
+        _lim = int(_total_cap) + int(_extra_cap)
+        if len(text) > _lim:
             for _head, _skey in _EVICT:
-                if len(text) <= int(_total_cap):
+                if len(text) <= _lim:
                     break
                 _kept = [b for b in out if not b.startswith(_head)]
                 if len(_kept) != len(out):
