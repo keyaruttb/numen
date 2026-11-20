@@ -27,7 +27,9 @@ import impression as impression_mod
 import facts as facts_mod
 import math
 import os
+import io
 import re
+import time
 
 
 class MixHabit(object):
@@ -237,6 +239,7 @@ class MixHabit(object):
                 return sp.block_lines(self.db)
             return sp.block_lines(self.db, max_chars=int(max_chars))
         except Exception:
+            # 策略格是「锦上添花」，取不到就安静省略这一格，绝不拖垮整轮。
             return []
 
     def speech_policy_snapshot(self):

@@ -7193,6 +7193,9 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             recent_lines=recent_lines,
             db=self.db)
         q = plan["budget"]
+        # 2026-11-20：本轮真实总预算（控制台 BUDGET 可调，现 13500）。
+        #   末尾的让位闸必须用它，不能用写死的 TOKEN_BUDGET，否则线上永远「超预算」。
+        _total_cap = int(plan.get("total") or budget or TOKEN_BUDGET or 0)
         # ---- 证据段硬配额（实验臂，2026-11-19）----------------------------
         # 默认 0.35（2026-11-19 实测：417 题有证据轮 139/305=45.6% → 144/305=47.2%；
         # 真卡 23 条尺子不变 62.5/75/100；0.45 反而回落到 46.8%，所以停在 0.35）。
@@ -8025,21 +8028,29 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 self._round_blk = _blk2
 
         text = "\n\n".join(out)
-        # V9.5：预算真爆了就让【说话方式】让位 —— 人格和证据优先于「怎么说话」的规则。
-        #    test_card2 的「超大输入不崩」就是拿 5000 字人格 + 50 行近上下文压这一条。
-        if len(text) > int(TOKEN_BUDGET):
-            for _attr, _skey in (("_speech_blk", "speech_policy"), ("_speech_blk", "speech"),
-                                 ("_round_blk", "round_hint")):
-                _sb = getattr(self, _attr, "")
-                if _sb and sections.get(_skey):
-                    try:
-                        if _sb in text:
-                            text = text.replace(_sb + "\n\n", "", 1).replace(_sb, "", 1)
-                            sections.pop(_skey, None)
-                    except Exception:
-                        pass
-                if len(text) <= int(TOKEN_BUDGET):
+        # V9.6：预算真爆了按「有多可惜」从低到高让位，不再一上来就砍【说话方式】。
+        #   2026-11-20 修：线上 prompt 平时就 6800~7000 字（人格整段 + 近上下文），
+        #   旧实现第一刀砍策略格，导致这一层每一轮都被砍掉，等于白上。
+        #   顺序：工作台 → 旧账 → 联想 → 事实/期待/欲望 → 时间 → 本轮倾向 → 策略格。
+        #   人格、长期、证据、此刻，永不在让位名单里。
+        _EVICT = (
+            ("【最近在做的事】", "worklog"),
+            ("【很久以前的事（翻旧账翻到的）】", "archive"),
+            ("【关联想起】", "assoc_link"),
+            ("【期待】", "expect"),
+            ("【事实】", "fact"),
+            ("【欲望】", "motiv"),
+            ("【这一轮】", "round_hint"),
+            ("【说话方式】", "speech_policy"),
+        )
+        if len(text) > int(_total_cap):
+            for _head, _skey in _EVICT:
+                if len(text) <= int(_total_cap):
                     break
+                _kept = [b for b in out if not b.startswith(_head)]
+                if len(_kept) != len(out):
+                    text = "\n\n".join(_kept)
+                    sections.pop(_skey, None)
         return {
             "text": text,
             "sections": sections,
