@@ -12,7 +12,7 @@
 
 ## 三个最弱点（按严重度）
 
-1. **关键治理状态可能串错。** [selfmodel.py](</D:/_projects/whale-card-oss/selfmodel.py>) `sync_state()` 用 `reason LIKE '%key%'` 查最新决策来同步状态；相近 key、包含关系或重复理由都可能把别的决策状态套到该条目上。`persona_apply()` 也应核对是否使用同一关联方式。
+1. **关键治理状态可能串错。** selfmodel.py `sync_state()` 用 `reason LIKE '%key%'` 查最新决策来同步状态；相近 key、包含关系或重复理由都可能把别的决策状态套到该条目上。`persona_apply()` 也应核对是否使用同一关联方式。
 2. **统计失败会伪装成零。** `weekly_stats()` 的 `_q1()` 在 SQL 异常时直接回默认值 0；`_qs()` 则回空列表。于是数据库缺表/查询错误时，复盘可能呈现“零事件”或“没有被纠正记录”，而不是失败。`weekly_review()` 的错误记录只覆盖抛出的异常。
 3. **“可审计引用”并非条目级证据链。** `build_self_model()` 把最近几周的周期号写进 `evidence_refs`，不记录对应反馈 ID、纳入/排除规则或计算分子分母的明细。审阅者无法从这个字段直接核验某条结论。
 
