@@ -296,7 +296,7 @@ ERROR_MEANINGS = {
     "E_RATE": "速率超限（/remember 每来源 60 次/分钟）",
     "E_EMPTY_TEXT": "/remember 的 text 为空",
     "E_TEXT_BIG": "/remember 的 text 超过长度上限",
-    "E_BAD_POOL": "/remember 的 pool 不在 short/medium/long 里",
+    "E_BAD_POOL": "/remember 的 pool 不在 short/medium/long/archive 里",
     "E_NOT_READY": "服务还没初始化完",
     "E_CROSS_ORIGIN": "浏览器跨站来源被拒（只接受本机页面）",
     "E_UNKNOWN": "没登记过的错误（说明有人新加了 error 字符串没登记码）",
@@ -2847,9 +2847,12 @@ class Handler(BaseHTTPRequestHandler):
                     #    被踢出去的那些海马分不够 → 直接遗忘（实测丢 1020 条）。
                     #    迁历史必须显式给 pool="long"。
                     _pool = (body.get("pool") or "").strip() or None
-                    if _pool is not None and _pool not in ("short", "medium", "long"):
+                    # 2026-11-21：archive（要存但不要被想起来的东西）也是合法池。
+                    # 原来路由层就把 archive 挡在门口，所以光改 store 里的 dscale 不够。
+                    _POOLS_OK = ("short", "medium", "long", "archive")
+                    if _pool is not None and _pool not in _POOLS_OK:
                         return self._fail(400, "bad_pool",
-                                          "pool 只能是 short/medium/long")
+                                          "pool 只能是 short/medium/long/archive")
                     with m.lock:
                         if m.writer_lock:
                             return self._fail(409, "card_locked",
