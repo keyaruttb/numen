@@ -332,7 +332,7 @@ GATE_WRITE_POST = frozenset((
     "/narrative/write",   # 写我自己那一段叙事
     "/feedback", "/review/run", "/review/confirm",   # V9.0 反馈环
     "/act",   # V9.4 立刻把意向做掉一次,
-    "/gov/decide", "/gov/mark", "/speech_policy/update",
+    "/gov/decide", "/gov/mark", "/speech_policy/update", "/distill/run",
     "/hormone/feedback",
     "/speech_policy",
 ))
@@ -2005,6 +2005,25 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     self._send(200, {"ok": True, "turn": row})
                     return
+            if path in ("/distill/stats", "/distill/run"):
+                import distill as _ds2
+                with m.lock:
+                    _ds2.ensure(m.card.db)
+                    if path == "/distill/stats":
+                        return self._send(200, {"ok": True,
+                                                "stats": _ds2.stats(m.card.db)})
+                    _lim = 10
+                    try:
+                        _lim = int((body or {}).get("limit") or 10)
+                    except Exception:
+                        _lim = 10
+                    _r = m.card.distill_learning(limit=_lim)
+                    return self._send(200, {"ok": True,
+                                            "skill": _r.get("skill"),
+                                            "insight": _r.get("insight"),
+                                            "err": _r.get("err"),
+                                            "stats": _ds2.stats(m.card.db)})
+
             if path in ("/retention", "/retention/set"):
                 import card2 as _c2
                 if method == "GET":
@@ -4521,6 +4540,7 @@ def _start_maintenance(mind):
         act_sec = float(os.environ.get("WHALE_ACT_SEC", "1200") or 0)
     except Exception:
         act_sec = 1200.0
+    kp_sec = float(os.environ.get("WHALE_KEEP_PROMOTE_SEC", "600") or 0)
 
     last = {"act": 0.0, "fade": 0.0, "habits": 0.0, "worklog": 0.0,
             "ckpt": 0.0, "learn": 0.0, "affect": 0.0, "outbox": 0.0}
@@ -4766,6 +4786,36 @@ def _start_maintenance(mind):
                             pass
                 except Exception as e:
                     print("[mind] 意向行动失败: %s" % e)
+
+            # 2.65) keep 晋升（2026-11-21，E1）：被想起很多天的中期记忆升 keep，
+            #       keep 走长期池速率 + 挡自动清理，配额在 tick 的 4c 里裁。
+            ds_sec = float(os.environ.get("WHALE_DISTILL_SEC", "1800") or 0)
+            if ds_sec > 0 and now - last.get("distill", 0.0) >= ds_sec:
+                last["distill"] = now
+                try:
+                    with mind.lock:
+                        _dsr = mind.card.distill_learning(now=now)
+                    if _dsr.get("skill") or _dsr.get("insight"):
+                        print("[mind] 学习回流：技能 +%d，自我认知候选 +%d"
+                              % (len(_dsr.get("skill") or []),
+                                 len(_dsr.get("insight") or [])), flush=True)
+                except Exception as _e:
+                    print("[mind] 学习回流失败：%s" % _e, flush=True)
+
+            if kp_sec > 0 and now - last.get("keep_promote", 0.0) >= kp_sec:
+                try:
+                    with mind.lock:
+                        _kp = mind.card.promote_frequent(now=now)
+                    last["keep_promote"] = now
+                    if _kp:
+                        print("[mind] keep 晋升：%d 条" % len(_kp))
+                        try:
+                            if mind.tl is not None:
+                                mind.tl.append("keep_promote", "升 keep %d 条" % len(_kp))
+                        except Exception:
+                            pass
+                except Exception as _e:
+                    print("[mind] keep 晋升失败: %s" % _e)
 
             # 2.7) 写入 outbox（V9.7.4）：派生没做成的，在这里退避重试。
             #     只碰 queued 且到点的，一次最多 5 条，做不成就再等，超限进死信。

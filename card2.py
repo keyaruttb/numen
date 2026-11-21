@@ -3955,6 +3955,44 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
     #   一次最多挪 20 条，且可以先只预览不落库（可回滚）。
     # 为什么不是直接删：硬盘够大，忘是检索行为不是删除行为（已归档那套同理）。
     # ============================================================
+    def promote_frequent(self, need=None, limit=None, now=None):
+        """把「被想起来很多天」的中期记忆升到 keep（2026-11-21，E1 发现）。
+
+        背景：中期池按 LAM_M（半衰期 ~29.7 天）衰减，两个月就跌破 SHOW_HINT=0.15，
+        于是「三个月前说过的话」查不到 —— 除非它一直被想起。keep 档现在走长期池速率
+        （半衰期 ~371 天）并挡自动清理，配额 200 在 tick 的 4c 里裁。
+        口径：只升不删；只认 recall_days（分散在不同日子被想起），不认同日刷屏。
+        """
+        need = int(need if need is not None else os.environ.get("WHALE_KEEP_PROMOTE_DAYS", "3"))
+        limit = int(limit if limit is not None else os.environ.get("WHALE_KEEP_PROMOTE_MAX", "40"))
+        out = []
+        try:
+            c = self.db.cursor()
+            _rows = c.execute(
+                    "SELECT id, recall_days, w FROM mem "
+                    "WHERE tier=? AND dead=0 AND COALESCE(recall_days,0)>=? "
+                    "ORDER BY recall_days DESC, w DESC LIMIT ?",
+                    (TIER_MID, need, limit)).fetchall()
+            for r in _rows:
+                mid = r["id"]
+                c.execute("UPDATE mem SET tier=? WHERE id=? AND tier=?",
+                          (TIER_PROTECTED, mid, TIER_MID))
+                if c.rowcount:
+                    out.append((mid, int(r["recall_days"] or 0)))
+                    try:
+                        import governance as _gvp
+                        _gvp.decide(c, "mem", int(mid), "update",
+                                    reason="召回 %d 天，升 keep" % int(r["recall_days"] or 0),
+                                    source="keep_promote", exec_state="applied")
+                    except Exception:
+                        pass
+            self.db.commit()
+        except Exception as e:
+            print("[card2] keep 晋升失败：%s" % e)
+        if out:
+            print("[card2] keep 晋升 %d 条" % len(out))
+        return out
+
     def medium_exit_plan(self, horizon_days=0, now=None, limit=200):
         """算一遍：中期池里哪些在 horizon_days 内会跌破进门线。只读。"""
         now = float(now if now is not None else self.clock.now())
@@ -4602,6 +4640,9 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             import outbox as _ob0
             _gv.ensure(self.db)
             _ob0.ensure(self.db)
+            # 2026-11-21 V9.9：学习回流层（distill）
+            import distill as _ds0
+            _ds0.ensure(self.db)
             # 2026-11-20 V9.8.1：轮次生命周期（评审 R2）。
             import turn as _tn
             _tn.ensure(self.db)
@@ -6061,6 +6102,28 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             if len(out) >= 3:       # 舱里太空就退回全库
                 return out
         return None
+
+    def distill_learning(self, limit=10, now=None):
+        """学习回流：把结过账的学习结果变成技能，把复盘变成自我认知候选。
+
+        为什么要单独一层：learn_note 只写 study 记忆、review 只写 episode 记忆，
+        `skill` 表虽然有完整的 SM-2 衰减与检索，但没有任何路径往里写（2026-11-21
+        发现，又是一次「看起来在工作」）。这里只做分流，不生成新内容；
+        不碰身份锚，自我认知一律先记治理 pending。
+        """
+        out = {"skill": [], "insight": [], "err": ""}
+        try:
+            import distill as _ds
+        except Exception as exc:
+            out["err"] = "import:%s" % exc
+            return out
+        try:
+            _ds.ensure(self.db)
+            out["skill"] = _ds.book_learning(self, limit=int(limit), now=now)
+            out["insight"] = _ds.sweep_reviews(self, limit=max(1, int(limit) // 2), now=now)
+        except Exception as exc:
+            out["err"] = "%s" % exc
+        return out
 
     def feedback_open(self, kind, mem_id, dialogue_id=None, note="",
                       source="explicit", trust_ok=True):
