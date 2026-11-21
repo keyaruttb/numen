@@ -2,7 +2,7 @@
 # 小鲸鱼数字生命卡 · 自省与自我模型 V10
 # 真名：selfmodel.py
 # 用途：每周自省（可复算的统计 + 证据引用）+ 少量统计型自我模型条目
-# 作者：小鲸鱼（与使用者一起）
+# 作者：汐音（与戊己一起）
 """自省与自我模型。
 
 设计原则（2026-11-21，按外部评审意见收敛过的版本）：
@@ -61,32 +61,84 @@ def ensure(conn):
             conn.execute("ALTER TABLE self_model ADD COLUMN zone TEXT NOT NULL DEFAULT 'stats'")
         if "why" not in cols:
             conn.execute("ALTER TABLE self_model ADD COLUMN why TEXT NOT NULL DEFAULT ''")
+        if "gov_id" not in cols:
+            conn.execute("ALTER TABLE self_model ADD COLUMN gov_id INTEGER NOT NULL DEFAULT 0")
     except Exception:
         pass
     conn.commit()
+    try:
+        backfill_gov_ids(conn)
+    except Exception:
+        pass
+
+
+def backfill_gov_ids(conn):
+    """把历史行（gov_id=0）接回治理台账，并把老格式 evidence_refs 归一。
+
+    只在首次/每次 ensure 后跑一遍：按 reason 精确前缀匹配一次，之后一律走 gov_id。
+    """
+    n = 0
+    try:
+        rows = conn.execute(
+            "SELECT key, evidence_refs FROM self_model WHERE COALESCE(gov_id,0)=0").fetchall()
+    except Exception:
+        return 0
+    for key, refs in rows:
+        got = conn.execute(
+            "SELECT id FROM gov_decision WHERE subject_kind='self_model'"
+            " AND (reason LIKE ? OR reason LIKE ?) ORDER BY id DESC LIMIT 1",
+            ("%%候选 %s：%%" % key, "可塑区待批 %s%%" % key)).fetchone()
+        if got:
+            conn.execute("UPDATE self_model SET gov_id=? WHERE key=?", (int(got[0]), key))
+            n += 1
+        # 归一 evidence_refs
+        if refs:
+            try:
+                import json as _j
+                v = _j.loads(refs)
+                if isinstance(v, list):
+                    conn.execute(
+                        "UPDATE self_model SET evidence_refs=? WHERE key=?",
+                        (_j.dumps({"periods": v, "feedback_ids": []}, ensure_ascii=False), key))
+            except Exception:
+                pass
+    if n:
+        conn.commit()
+    return n
 
 
 def period_of(ts):
     return time.strftime(PERIOD_FMT, time.localtime(float(ts)))
 
 
+_FAILS = []          # 本周统计里失败的查询（(sql 片段, 异常)。非空即判 error）
+
+
+def _fail(sql, exc):
+    _FAILS.append((sql.strip().split("\n")[0][:60], str(exc)[:120]))
+
+
 def _q1(conn, sql, *a, default=0):
+    """计数查询。失败时**记失败**并抛，不静默归零——空值和「没有发生」是两种事实。"""
     try:
         r = conn.execute(sql, a).fetchone()
         return r[0] if r is not None and r[0] is not None else default
-    except Exception:
-        return default
+    except Exception as exc:
+        _fail(sql, exc)
+        raise
 
 
 def _qs(conn, sql, *a):
     try:
         return conn.execute(sql, a).fetchall()
-    except Exception:
-        return []
+    except Exception as exc:
+        _fail(sql, exc)
+        raise
 
 
 def weekly_stats(card, t0, t1):
     """一周的可复算统计。所有数字都能用 SQL 复现（见 docs/V10-自省.md）。"""
+    _FAILS.clear()
     c = card.db
     out = {
         "period": period_of(t0),
@@ -254,28 +306,35 @@ def build_self_model(card, now=None):
         agg["insight"] += int(o.get("distill_insight") or 0)
         agg["intent"] += int(o.get("intent_consumed") or 0)
 
+    # 条目级证据：把这几周里负向 / 正向反馈的 id 拼起来（不是只给周期号）
+    neg_ids, pos_ids = [], []
+    for r in rows:
+        o = json.loads(r["observed"] or "{}")
+        neg_ids += list(o.get("refs_neg") or [])
+        pos_ids += list(o.get("refs_pos") or [])
     cands = []
     if agg["fb"] >= 3:
         ratio = agg["praise"] / float(agg["fb"])
         cands.append(("tone.warmth", "近 %d 周被夸比例 %.0f%%（%d/%d）"
                       % (agg["weeks"], ratio * 100, agg["praise"], agg["fb"]),
-                      min(1.0, agg["fb"] / 10.0), agg["fb"]))
+                      min(1.0, agg["fb"] / 10.0), agg["fb"], pos_ids[:20]))
     if agg["corrected"] >= 2:
         cands.append(("habit.correction", "近 %d 周被纠正/被否 %d 次"
                       % (agg["weeks"], agg["corrected"]),
-                      min(1.0, agg["corrected"] / 5.0), agg["corrected"]))
+                      min(1.0, agg["corrected"] / 5.0), agg["corrected"], neg_ids[:20]))
     if agg["skills"]:
         cands.append(("skill.growth", "近 %d 周从学习里沉淀 %d 条技能" % (agg["weeks"], agg["skills"]),
-                      min(1.0, agg["skills"] / 3.0), agg["skills"]))
+                      min(1.0, agg["skills"] / 3.0), agg["skills"], []))
     if agg["intent"]:
         cands.append(("action.throughput", "近 %d 周真的做掉 %d 条意向" % (agg["weeks"], agg["intent"]),
-                      min(1.0, agg["intent"] / 5.0), agg["intent"]))
+                      min(1.0, agg["intent"] / 5.0), agg["intent"], []))
 
     out = []
-    for key, val, conf, n in cands:
+    for key, val, conf, n, ref_ids in cands:
         if conf < MODEL_CONF_MIN:
             continue
-        refs = json.dumps([r["period"] for r in rows], ensure_ascii=False)
+        refs = json.dumps({"periods": [r["period"] for r in rows],
+                           "feedback_ids": list(ref_ids)}, ensure_ascii=False)
         card.db.execute(
             "INSERT INTO self_model(key,value,confidence,evidence_n,evidence_refs,source,state,ts,last_eval_ts)"
             " VALUES(?,?,?,?,?,?,?,?,?)"
@@ -284,29 +343,38 @@ def build_self_model(card, now=None):
             " evidence_refs=excluded.evidence_refs, last_eval_ts=excluded.last_eval_ts",
             (key, val, conf, n, refs, "stats", "pending", now, now))
         card.db.commit()
+        gid = 0
         try:
-            gov_mod.decide(card.db, "self_model", 0, "pending",
-                           reason="自我模型候选 %s：%s" % (key, val[:60]),
-                           source="selfmodel", exec_state="pending")
+            gres = gov_mod.decide(card.db, "self_model", 0, "pending",
+                                  reason="自我模型候选 %s：%s" % (key, val[:60]),
+                                  source="selfmodel", exec_state="pending")
+            gid = int((gres or {}).get("id") or 0)
         except Exception:
             pass
-        out.append({"key": key, "value": val, "confidence": round(conf, 2)})
+        if gid:
+            card.db.execute("UPDATE self_model SET gov_id=? WHERE key=?", (gid, key))
+            card.db.commit()
+        out.append({"key": key, "value": val, "confidence": round(conf, 2), "gov_id": gid})
     return out
 
 
 def sync_state(card):
-    """把治理里的最终状态镜像到 self_model（单一权威：gov_decision）。"""
+    """把治理里的最终状态镜像到 self_model（单一权威：gov_decision）。
+
+    🔧 按 gov_id 精确关联（原用 reason LIKE '%key%'，相近 key 会串账）。
+    """
     try:
         rows = card.db.execute(
-            "SELECT key, state FROM self_model WHERE state='pending'").fetchall()
+            "SELECT key, state, COALESCE(gov_id,0) FROM self_model WHERE state='pending'"
+        ).fetchall()
     except Exception:
         return 0
     n = 0
     for r in rows:
-        got = card.db.execute(
-            "SELECT exec_state FROM gov_decision WHERE subject_kind='self_model'"
-            " AND reason LIKE ? ORDER BY id DESC LIMIT 1",
-            ("%%%s%%" % r["key"],)).fetchone()
+        if not r[2]:
+            continue
+        got = card.db.execute("SELECT exec_state FROM gov_decision WHERE id=?",
+                              (int(r[2]),)).fetchone()
         if not got:
             continue
         st = {"applied": "active", "superseded": "retired",
@@ -373,13 +441,18 @@ def persona_propose(card, key, value, why="", evidence_n=0, now=None):
         (key, str(value), 0.5, int(evidence_n), "[]", "manual", "pending", now, now,
          "persona", str(why)[:300]))
     card.db.commit()
+    gid = 0
     try:
-        gov_mod.decide(card.db, "self_model", 0, "pending",
-                       reason="可塑区待批 %s：%s（%s）" % (key, str(value)[:40], str(why)[:60]),
-                       source="persona", exec_state="pending")
+        gres = gov_mod.decide(card.db, "self_model", 0, "pending",
+                              reason="可塑区待批 %s" % key, source="persona",
+                              exec_state="pending")
+        gid = int((gres or {}).get("id") or 0)
     except Exception:
         pass
-    return {"ok": True, "key": key, "state": "pending"}
+    if gid:
+        card.db.execute("UPDATE self_model SET gov_id=? WHERE key=?", (gid, key))
+        card.db.commit()
+    return {"ok": True, "key": key, "state": "pending", "gov_id": gid}
 
 
 def persona_apply(card, key, now=None):
