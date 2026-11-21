@@ -2059,8 +2059,10 @@ class Handler(BaseHTTPRequestHandler):
             if path in ("/topics", "/topics/stats"):
                 try:
                     import topics as _tp4
-                    _n = int((qs.get("limit") or ["3"])[0])
-                    _d = float((qs.get("days") or ["4"])[0])
+                    import urllib.parse as _up
+                    _q2 = _up.parse_qs(_up.urlparse(self.path).query)
+                    _n = int((_q2.get("limit") or ["3"])[0])
+                    _d = float((_q2.get("days") or ["4"])[0])
                     if path == "/topics/stats":
                         return self._send(200, {"ok": True, "stats": _tp4.stats(m.card.db)})
                     return self._send(200, {"ok": True, "items": _tp4.recent(m.card.db, limit=_n, days=_d),
@@ -2069,7 +2071,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(500, {"ok": False, "error": repr(e)[:160]})
             if path == "/relation/layers":
                 try:
-                    _uid = (qs.get("uid") or [""])[0]
+                    import urllib.parse as _up2
+                    _uid = (_up2.parse_qs(_up2.urlparse(self.path).query).get("uid") or [""])[0]
                     return self._send(200, {"ok": True, "uid": _uid, "layer": m.card.person_layer_of(uid=_uid)})
                 except Exception as e:
                     return self._send(500, {"ok": False, "error": repr(e)[:160]})
