@@ -3955,6 +3955,30 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
     #   一次最多挪 20 条，且可以先只预览不落库（可回滚）。
     # 为什么不是直接删：硬盘够大，忘是检索行为不是删除行为（已归档那套同理）。
     # ============================================================
+    def self_review_tick(self, now=None, force=False):
+        """周自省 + 自我模型刷新 + 治理状态镜像。返回做了什么。"""
+        import selfmodel as _sm
+        now = time.time() if now is None else float(now)
+        out = {"review": [], "model": [], "synced": 0}
+        try:
+            _sm.ensure(self.db)
+            out["review"] = _sm.weekly_review(self, now=now, force=force)
+            out["model"] = _sm.build_self_model(self, now=now)
+            out["synced"] = _sm.sync_state(self)
+        except Exception as exc:
+            print("[card2] 自省失败：%s" % exc)
+            out["err"] = str(exc)[:200]
+        return out
+
+    def persona_lines(self, limit=None):
+        """可塑区：只有 active 的条目才进 prompt。"""
+        try:
+            import selfmodel as _sm
+            return _sm.persona_lines(self, limit=limit)
+        except Exception as exc:
+            print("[card2] 可塑区读取失败：%s" % exc)
+            return []
+
     def promote_frequent(self, need=None, limit=None, now=None):
         """把「被想起来很多天」的中期记忆升到 keep（2026-11-21，E1 发现）。
 
@@ -4646,6 +4670,9 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             # 2026-11-20 V9.8.1：轮次生命周期（评审 R2）。
             import turn as _tn
             _tn.ensure(self.db)
+            # 2026-11-21 V10：周自省 / 自我模型 / 可塑区
+            import selfmodel as _sm0
+            _sm0.ensure(self.db)
         except Exception:
             pass
 
@@ -7642,6 +7669,16 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 out.append(_blk)
                 sections["speech_policy"] = len(_blk)
                 self._speech_blk = _blk
+        # V10.1 可塑区：他允许我改的那部分自己（只有 active 的进 prompt）
+        if os.environ.get("WHALE_PERSONA", "1") != "0":
+            try:
+                _pers = self.persona_lines()
+            except Exception:
+                _pers = []
+            if _pers:
+                _ptxt = "【我现在的样子（可改）】\n" + "\n".join(_pers)
+                out.append(_ptxt)
+                sections["persona"] = len(_ptxt)
         used = 0   # 策略格走独立配额（BLOCK_MAX_CHARS），这里从 0 起算
 
         # ② 长期印象格：长期池里「值得一直记得」的几条

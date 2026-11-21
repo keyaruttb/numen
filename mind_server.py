@@ -332,7 +332,7 @@ GATE_WRITE_POST = frozenset((
     "/narrative/write",   # 写我自己那一段叙事
     "/feedback", "/review/run", "/review/confirm",   # V9.0 反馈环
     "/act",   # V9.4 立刻把意向做掉一次,
-    "/gov/decide", "/gov/mark", "/speech_policy/update", "/distill/run",
+    "/gov/decide", "/gov/mark", "/speech_policy/update", "/distill/run", "/self_review/run", "/self_model/propose", "/self_model/apply", "/self_model/revoke",
     "/hormone/feedback",
     "/speech_policy",
 ))
@@ -1947,6 +1947,67 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True,
                                         "items": _gd2.recent(m.card.db, limit=_lim),
                                         "stats": _gd2.stats(m.card.db)})
+            if path.startswith("/self"):
+                db = m.card.db
+                if method == "GET" and path == "/self_review":
+                    import selfmodel as _smr
+                    lim = 8
+                    try:
+                        import urllib.parse as _up
+                        _qq = _up.parse_qs(_up.urlparse(self.path).query)
+                        lim = int((_qq.get("limit") or ["8"])[0] or 8)
+                    except Exception:
+                        pass
+                    rows = db.execute(
+                        "SELECT period, observed, insights, proposals, state, err, ts"
+                        " FROM self_review ORDER BY period DESC LIMIT ?", (lim,)).fetchall()
+                    items = [{"period": r[0], "observed": json.loads(r[1] or "{}"),
+                              "insights": json.loads(r[2] or "[]"),
+                              "proposals": json.loads(r[3] or "[]"),
+                              "state": r[4], "err": r[5], "ts": r[6]} for r in rows]
+                    return self._send(200, {"ok": True, "items": items,
+                                            "stats": _smr.stats(m.card)})
+                if method == "GET" and path == "/self_model":
+                    rows = db.execute(
+                        "SELECT key, value, confidence, evidence_n, evidence_refs, source, state,"
+                        " ts, COALESCE(zone,'stats'), COALESCE(why,'') FROM self_model"
+                        " ORDER BY state, key").fetchall()
+                    items = [{"key": r[0], "value": r[1], "confidence": r[2],
+                              "evidence_n": r[3], "evidence_refs": json.loads(r[4] or "[]"),
+                              "source": r[5], "state": r[6], "ts": r[7], "zone": r[8],
+                              "why": r[9]} for r in rows]
+                    return self._send(200, {"ok": True, "items": items})
+                if method == "POST" and path == "/self_review/run":
+                    body = self._body() or {}
+                    with m.lock:
+                        out = m.card.self_review_tick(force=bool(body.get("force")))
+                    return self._send(200, {"ok": True, "result": out})
+                if method == "POST" and path == "/self_model/propose":
+                    body = self._body() or {}
+                    import selfmodel as _smp
+                    try:
+                        with m.lock:
+                            res = _smp.persona_propose(
+                                m.card, body.get("key", ""), body.get("value", ""),
+                                why=body.get("why", ""),
+                                evidence_n=int(body.get("evidence_n") or 0))
+                    except ValueError as exc:
+                        return self._send(400, {"ok": False, "error": "denied",
+                                                "detail": str(exc)})
+                    return self._send(200, {"ok": True, "result": res})
+                if method == "POST" and path == "/self_model/apply":
+                    body = self._body() or {}
+                    import selfmodel as _smp2
+                    with m.lock:
+                        res = _smp2.persona_apply(m.card, body.get("key", ""))
+                    return self._send(200 if res.get("ok") else 404, res)
+                if method == "POST" and path == "/self_model/revoke":
+                    body = self._body() or {}
+                    import selfmodel as _smp3
+                    with m.lock:
+                        res = _smp3.persona_revoke(m.card, body.get("key", ""))
+                    return self._send(200, res)
+
             if path.startswith("/gov"):
                 import governance as _gv
                 if method == "GET" and path == "/gov/log":
@@ -4538,11 +4599,12 @@ def _start_maintenance(mind):
     try:
         outbox_sec = float(os.environ.get("WHALE_OUTBOX_SEC", "300") or 0)
         act_sec = float(os.environ.get("WHALE_ACT_SEC", "1200") or 0)
+        selfreview_sec = float(os.environ.get("WHALE_SELFREVIEW_SEC", "3600") or 0)
     except Exception:
         act_sec = 1200.0
     kp_sec = float(os.environ.get("WHALE_KEEP_PROMOTE_SEC", "600") or 0)
 
-    last = {"act": 0.0, "fade": 0.0, "habits": 0.0, "worklog": 0.0,
+    last = {"act": 0.0, "selfreview": 0.0, "fade": 0.0, "habits": 0.0, "worklog": 0.0,
             "ckpt": 0.0, "learn": 0.0, "affect": 0.0, "outbox": 0.0}
     # 线程起来就先记一次心跳：否则 /health 在第一个周期内会误报
     # maintenance_never_ran（明明刚启动，还没来得及跳第一跳）。
@@ -4786,6 +4848,18 @@ def _start_maintenance(mind):
                             pass
                 except Exception as e:
                     print("[mind] 意向行动失败: %s" % e)
+
+            if selfreview_sec > 0 and now - last.get("selfreview", 0.0) >= selfreview_sec:
+                last["selfreview"] = now
+                try:
+                    with mind.lock:
+                        _sr = mind.card.self_review_tick(now=now)
+                    if _sr.get("review") or _sr.get("model"):
+                        print("[mind] 周自省：%s" % json.dumps(
+                            {"review": _sr.get("review"), "model": _sr.get("model")},
+                            ensure_ascii=False))
+                except Exception as exc:
+                    print("[mind] 周自省失败：%s" % exc)
 
             # 2.65) keep 晋升（2026-11-21，E1）：被想起很多天的中期记忆升 keep，
             #       keep 走长期池速率 + 挡自动清理，配额在 tick 的 4c 里裁。
