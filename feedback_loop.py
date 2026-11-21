@@ -51,13 +51,17 @@ DEFAULTS = {
     "fb_w_disconfirm": 0.15,
     "fb_w_reuse": 0.05,
     "fb_w_promise": 0.05,
-    "fb_min_n": 3,
+    "fb_min_n": 2,
     "fb_max_n": 8,
-    "fb_promo_strength": 0.60,
+    "fb_promo_strength": 0.55,
     "fb_half_life_days": 14.0,
     "fb_nightly_hours": 6.0,
     "fb_affect_lr": AFFECT_LR,
 }
+
+# 2026-11-21：老库里这两个键已被 ensure() 种成旧默认（3 / 0.60），
+# 只改 DEFAULTS 不生效 —— 这里做一次「还等于旧默认才改」的迁移。
+_MIGRATE = (("fb_min_n", "3", "2"), ("fb_promo_strength", "0.6", "0.55"))
 
 DDL = [
     """CREATE TABLE IF NOT EXISTS feedback (
@@ -176,7 +180,17 @@ def ensure(conn):
             c.execute("INSERT OR IGNORE INTO meta(key, val) VALUES(?, ?)", (k, str(v)))
     except Exception:
         pass
-    conn.commit()
+    # 2026-11-21：老库把这两个键种成了旧默认（3 / 0.60），只改 DEFAULTS 不生效。
+    # 这里做一次「还等于旧默认才改」的迁移，放在 return 之前。
+    for _k, _old, _new in _MIGRATE:
+        try:
+            conn.execute("UPDATE meta SET val=? WHERE key=? AND val=?", (_new, _k, _old))
+        except Exception:
+            pass
+    try:
+        conn.commit()
+    except Exception:
+        pass
     return True
 
 
@@ -369,8 +383,13 @@ class FeedbackLoop(object):
         """拿他的下一句话，给最近一条还 open 的「我说的话」结算。"""
         try:
             sig = self._reaction_of(text)
+            _neutral = False
             if not sig:
-                return {"settled": False, "why": "no_signal"}
+                # 2026-11-21：读不出倾向也要结账。
+                # 以前这里直接 return no_signal，结果中性对话（「嗯」「然后呢」「所以还有什么问题」）
+                # 全部挂在 open，三天后被 drop_stale 当过期悄悄收掉 —— 账面上结过的只有被夸被骂那一半。
+                sig = {"label": "没读出倾向"}
+                _neutral = True
             row = self.db.execute(
                 "SELECT id, mem_id FROM feedback WHERE kind='self_utterance' AND status='open'"
                 " ORDER BY ts_action DESC, id DESC LIMIT 1").fetchone()
@@ -394,6 +413,7 @@ class FeedbackLoop(object):
             except Exception as _te:
                 print("[feedback] 轮次标注失败：%s" % _te)
             return {"settled": True, "fb_id": fb_id, "label": sig.get("label"),
+                    "neutral": _neutral,
                     "r": (out or {}).get("r"), "bucket": (out or {}).get("bucket"),
                     "mem_id": _mem_id}
         except Exception as e:
@@ -729,6 +749,18 @@ class FeedbackLoop(object):
             row2 = self._row("SELECT region FROM mem WHERE id=?", (int(mid),))
             is_study = bool(row2 is not None and str(row2["region"]) == "study")
         is_promise = str(row.get("kind") or "") == "promise"
+        # 2026-11-21：12 小时内已经消化过同一条，就别让它在同一个边界上原地重生。
+        # 实测有 18 条 explore 常驻 active：每 20 分钟做掉 3 条，learn 队列消化慢，
+        # 于是「做掉—重生」来回转，看着忙其实在原地。
+        def _consumed_recently(_d, _k):
+            try:
+                return self._row(
+                    "SELECT id FROM intention WHERE direction=? AND kind=?"
+                    " AND COALESCE(mem_id,0)=? AND status='consumed' AND last_touch_ts >= ? LIMIT 1",
+                    (_d, _k, int(mid or 0), nowv - 43200)) is not None
+            except Exception:
+                return False
+
         plan = []
         if r > 0:
             if is_study:
@@ -743,6 +775,8 @@ class FeedbackLoop(object):
                 plan = [("avoid", "avoid_scene", "competence")]
             else:
                 plan = [("avoid", "self_check", "order")]
+        # 2026-11-21：过滤掉 12 小时内已经消化过的同类意向（见上面的 _consumed_recently）
+        plan = [(_d, _k, _dr) for (_d, _k, _dr) in plan if not _consumed_recently(_d, _k)]
         out = []
         for direction, kind, drive in plan:
             out.append(self._upsert_intention(

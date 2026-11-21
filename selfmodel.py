@@ -2,7 +2,7 @@
 # 小鲸鱼数字生命卡 · 自省与自我模型 V10
 # 真名：selfmodel.py
 # 用途：每周自省（可复算的统计 + 证据引用）+ 少量统计型自我模型条目
-# 作者：汐音（与戊己一起）
+# 作者：小鲸鱼（与使用者一起）
 """自省与自我模型。
 
 设计原则（2026-11-21，按外部评审意见收敛过的版本）：
@@ -335,13 +335,19 @@ def build_self_model(card, now=None):
             continue
         refs = json.dumps({"periods": [r["period"] for r in rows],
                            "feedback_ids": list(ref_ids)}, ensure_ascii=False)
+        # 2026-11-21：统计型自我模型「证据够就生效」。
+        #   它们只是把可复算的计数说出来（被夸比例、被纠次数、技能数、意向吞吐），
+        #   不像人格条文那样会改变别人看见的我是谁；挂在门口不生效等于没做。
+        #   人格型（persona）仍然一律 pending，等人点头 —— 那条线不自动。
+        _state = "active" if int(n) >= 5 else "pending"
         card.db.execute(
             "INSERT INTO self_model(key,value,confidence,evidence_n,evidence_refs,source,state,ts,last_eval_ts)"
             " VALUES(?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
             " confidence=excluded.confidence, evidence_n=excluded.evidence_n,"
-            " evidence_refs=excluded.evidence_refs, last_eval_ts=excluded.last_eval_ts",
-            (key, val, conf, n, refs, "stats", "pending", now, now))
+            " evidence_refs=excluded.evidence_refs, state=excluded.state,"
+            " last_eval_ts=excluded.last_eval_ts",
+            (key, val, conf, n, refs, "stats", _state, now, now))
         card.db.commit()
         gid = 0
         try:
@@ -483,6 +489,71 @@ def persona_revoke(card, key, now=None):
     except Exception:
         pass
     return {"ok": True, "key": key, "state": "retired"}
+
+
+AUTONOMY_MIN_N = 8          # 一般情形：证据 ≥8 次才自动生效
+AUTONOMY_MIN_N_NEG = 12     # 带着负面证据（被纠正/被否）时更严
+_NEG_WORDS = ("纠正", "被否", "骂", "反感", "做错", "记错", "太满", "瞎说")
+
+
+def persona_autonomy(card, limit=1, now=None):
+    """可塑区自治：我自己决定哪些人格条文生效（用户 m11600 授权）。
+
+    不是「自动批准一切」：证据门槛、负证据加严、一次只放一条、全部留痕。
+    返回本次生效的条目（列表）。
+    """
+    import governance as gov_mod
+    now = time.time() if now is None else float(now)
+    ensure(card.db)
+    active_n = card.db.execute(
+        "SELECT COUNT(*) FROM self_model WHERE zone='persona' AND state='active'").fetchone()[0]
+    room = max(0, int(PERSONA_MAX_ACTIVE) - int(active_n))
+    if room <= 0 or limit <= 0:
+        return []
+    rows = card.db.execute(
+        "SELECT key, value, why, evidence_n, evidence_refs, gov_id FROM self_model"
+        " WHERE zone='persona' AND state='pending'"
+        " ORDER BY evidence_n DESC, last_eval_ts DESC").fetchall()
+    done = []
+    for r in rows:
+        if len(done) >= int(limit):
+            break
+        key = str(r["key"] or "")
+        if key.split(".")[0].lower() in [x.lower() for x in PERSONA_DENY]:
+            continue
+        n = int(r["evidence_n"] or 0)
+        # 2026-11-21（我自己定的）：门槛不按措辞分档。
+        #   ① 证据次数 ≥ AUTONOMY_MIN_N（8）；
+        #   ② 要么有可查的账（refs 里任一非空 list），要么写了理由（why 非空）。
+        # 理由：按「被纠正」加重会把最能说明问题的那类规矩全挡住——那些恰恰是有账的。
+        try:
+            _refs = json.loads(r["evidence_refs"] or "{}") or {}
+        except Exception:
+            _refs = {}
+        if isinstance(_refs, list):
+            _refs = {}
+        _has_chain = any(isinstance(v, list) and v for v in _refs.values())
+        if n < AUTONOMY_MIN_N:
+            continue
+        if not _has_chain and not str(r["why"] or "").strip():
+            continue
+        card.db.execute(
+            "UPDATE self_model SET state='active', last_eval_ts=? WHERE key=?", (now, key))
+        card.db.commit()
+        gid = int(r["gov_id"] or 0)
+        try:
+            if gid:
+                gov_mod.mark(card.db, gid, "applied",
+                             note="可塑区自治生效（证据 %d ≥ %d，链条 %s）" % (n, AUTONOMY_MIN_N, _has_chain))
+            else:
+                g = gov_mod.decide(card.db, "self_model", 0, "update",
+                                   reason="可塑区自治生效 %s（证据 %d）" % (key, n),
+                                   source="selfmodel_autonomy", exec_state="applied")
+                gid = int((g or {}).get("id") or 0)
+        except Exception as _ge:
+            print("[selfmodel] 自治留痕失败：%s" % _ge)
+        done.append({"key": key, "evidence_n": n, "need": AUTONOMY_MIN_N, "chain": _has_chain, "gov_id": gid})
+    return done
 
 
 def persona_lines(card, limit=None):

@@ -138,7 +138,8 @@ def propose_from(card, limit=2, min_len=40, now=None):
         try:
             pr = sm.persona_propose(card, key, about_self[:120],
                                     why="来自一条思考：%s" % (title or "无标题"),
-                                    evidence_n=1, now=now)
+                                    evidence_n=1, now=now,
+                                    refs={"contemplation_ids": [cid]})
         except Exception as exc:
             out.append({"ok": False, "id": cid, "err": str(exc)[:160]})
             continue

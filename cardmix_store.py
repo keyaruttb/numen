@@ -320,6 +320,15 @@ class MixStore:
              str(about_uid or ""), _lay, _quar, float(_evts or 0.0), _evprec or "",
              str(sess or ""), _who, _where, _ekind))
         mid = c.lastrowid
+        # 🔧 2026-11-21：给 flash 档一个真正的写入方。
+        #   此前全库只有「到期扫成空壳」的读方，没有任何一处把 tier 写成 flash，
+        #   于是「七日短讯」在真卡上是 0 行 —— 第五次同型病（钩子挂着没接线）。
+        #   规则保守：chatter 分区 + ≤12 字 + 没有实体 → 标 flash，七天到点自然降级。
+        try:
+            if str(region or "") == "chatter" and len(str(text or "")) <= 12 and not entities:
+                c.execute("UPDATE mem SET tier='flash' WHERE id=?", (mid,))
+        except Exception as _fle:
+            soft_fail("flash_tier", _fle, "标 flash 失败")
         # V5.4：正式入库的记忆也在收件层留一份原文（kept=1）。
         # 这样短期池淘汰之后，60 小时内还能从收件层把它原样翻回来 —
         # 「原文进短期」不再依赖我每轮都记得调 /report。

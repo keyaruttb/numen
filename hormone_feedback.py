@@ -112,7 +112,7 @@ class Regulator:
         except Exception:
             pass
         rel = max(float(self.cfg["rel_th"]), base + float(self.cfg["rel_margin"]))
-        return min(rel, float(self.cfg["sat_th"]) - 0.02)
+        return min(rel, sat_of(hk, self.cfg) - 0.02)
 
     # ------------------------------------------------------------ 状态机
     def tick(self, hs, dt_hours=1.0):
@@ -124,7 +124,6 @@ class Regulator:
         """
         dt = max(0.0, float(dt_hours))
         floor_gain = 1.0 - float(self.cfg["max_suppress"])
-        sat = float(self.cfg["sat_th"])
         mods = {}
         events = []
 
@@ -132,6 +131,7 @@ class Regulator:
             st = self.states[short]
             level = float(hs.get(hk, hormone.H_BASE.get(hk, 0.5)))
             rel = self._rel_eff(hk)
+            sat = sat_of(hk, self.cfg)   # 2026-11-21：阈值按激素分档
 
             if level >= sat:
                 entering = not st.suppressed
@@ -231,6 +231,20 @@ def cfg_from_meta(db):
 
 
 # ---------------------------------------------------------------- 包装函数
+# 2026-11-21：阈值按激素分档。
+#   全局 0.82 对血清素（基线 0.66）勉强合适，对催产素（基线 0.50）就太高 ——
+#   它要顶到 0.82 才进抑制，等于日常永远不触发。这里给每条激素自己的抑制线，
+#   释放线仍按「基线 + rel_margin」算，再夹在 sat-0.02 以内。
+SAT_BY = {"h_oxy": 0.72, "h_dopa": 0.85, "h_sero": 0.82, "h_cort": 0.42}
+
+
+def sat_of(hk, cfg):
+    try:
+        return float(SAT_BY.get(str(hk), cfg.get("sat_th", 0.82)))
+    except Exception:
+        return 0.82
+
+
 def regulated_regress(hs, dt_hours, mods, bases=None, lam=None):
     """带清除加速的稳态回归。
 

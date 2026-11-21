@@ -3999,6 +3999,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             try:
                 import contemplate as _ct2
                 out["persona"] = _ct2.propose_from(self, now=now)
+                out["persona_on"] = _sm.persona_autonomy(self, now=now)
             except Exception as exc:
                 print("[card2] 思考转可塑区失败：%s" % exc)
                 out["persona"] = []
