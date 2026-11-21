@@ -1,0 +1,56 @@
+{
+ "ts": "2026-11-21T10:26:12+0800",
+ "db": "D:\\card.db",
+ "db_bytes": 63344640,
+ "db_sha256": "e6085b646189f220da0c34b6f4231a70148e905265cf9a110c336be2c19d26fd",
+ "mem_alive": 2478,
+ "mem_dead": 1,
+ "chunk": 2727,
+ "dialogue": 3390,
+ "mem_birth": 3012,
+ "synapse": 18922,
+ "impression": 567,
+ "tiers": {
+  "core_mutable": 161,
+  "keep": 80,
+  "mid": 2237
+ },
+ "pools": {
+  "archive": 40,
+  "long": 792,
+  "medium": 1579,
+  "medium_warm": 60,
+  "short": 1,
+  "short_warm": 6
+ },
+ "regions": {
+  "chatter": 564,
+  "episode": 1439,
+  "fact": 209,
+  "flash": 180,
+  "habit": 9,
+  "preference": 48,
+  "self": 9,
+  "study": 8,
+  "work": 12
+ },
+ "recall_days_ge3_mid": 3,
+ "mean_w": 0.5914,
+ "feedback": {
+  "decision": 5,
+  "learn": 3,
+  "self_utterance": 59
+ },
+ "intention": {
+  "consumed": 72,
+  "faded": 2
+ },
+ "gov": {
+  "keep_promote": 80,
+  "manual": 1,
+  "reconcile": 2,
+  "write": 30
+ },
+ "learn_task": 25,
+ "python": "3.13.1"
+}
