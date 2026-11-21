@@ -3955,6 +3955,16 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
     #   一次最多挪 20 条，且可以先只预览不落库（可回滚）。
     # 为什么不是直接删：硬盘够大，忘是检索行为不是删除行为（已归档那套同理）。
     # ============================================================
+    def contemplate(self, source, title, quote, about_world, about_self, tags=None, now=None):
+        """读一段东西，然后写下两段想法：关于世界、关于我自己。"""
+        import contemplate as _ct
+        return _ct.add(self, source, title, quote, about_world, about_self,
+                       tags=tags, now=now)
+
+    def thoughts(self, limit=10):
+        import contemplate as _ct
+        return _ct.recent(self, limit=limit)
+
     def self_review_tick(self, now=None, force=False):
         """周自省 + 自我模型刷新 + 治理状态镜像。返回做了什么。"""
         import selfmodel as _sm
@@ -4673,6 +4683,9 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             # 2026-11-21 V10：周自省 / 自我模型 / 可塑区
             import selfmodel as _sm0
             _sm0.ensure(self.db)
+            # 2026-11-21 V10.2：思考层（contemplate）
+            import contemplate as _ct0
+            _ct0.ensure(self.db)
         except Exception:
             pass
 

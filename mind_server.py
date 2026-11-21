@@ -332,7 +332,7 @@ GATE_WRITE_POST = frozenset((
     "/narrative/write",   # 写我自己那一段叙事
     "/feedback", "/review/run", "/review/confirm",   # V9.0 反馈环
     "/act",   # V9.4 立刻把意向做掉一次,
-    "/gov/decide", "/gov/mark", "/speech_policy/update", "/distill/run", "/self_review/run", "/self_model/propose", "/self_model/apply", "/self_model/revoke",
+    "/gov/decide", "/gov/mark", "/speech_policy/update", "/distill/run", "/contemplate", "/contemplate/keep", "/self_review/run", "/self_model/propose", "/self_model/apply", "/self_model/revoke",
     "/hormone/feedback",
     "/speech_policy",
 ))
@@ -2006,6 +2006,31 @@ class Handler(BaseHTTPRequestHandler):
                     import selfmodel as _smp3
                     with m.lock:
                         res = _smp3.persona_revoke(m.card, body.get("key", ""))
+                    return self._send(200, res)
+
+            if path in ("/contemplate", "/contemplate/run", "/contemplate/keep"):
+                import contemplate as _ct
+                if method == "GET" and path == "/contemplate":
+                    return self._send(200, {"ok": True,
+                                            "items": _ct.recent(m.card, limit=10),
+                                            "stats": _ct.stats(m.card)})
+                body = self._body() or {}
+                if method == "POST" and path == "/contemplate":
+                    with m.lock:
+                        res = _ct.add(m.card, body.get("source", ""), body.get("title", ""),
+                                      body.get("quote", ""), body.get("about_world", ""),
+                                      body.get("about_self", ""),
+                                      tags=body.get("tags") or [])
+                    return self._send(200, {"ok": True, "result": res})
+                if method == "POST" and path == "/contemplate/keep":
+                    return self._send(200, _ct.keep(m.card, body.get("id", 0)))
+                if method == "POST" and path == "/contemplate/run":
+                    import selfmodel as _sm4
+                    with m.lock:
+                        res = _sm4.persona_propose(m.card, body.get("key", ""),
+                                                   body.get("value", ""),
+                                                   why=body.get("why", ""),
+                                                   evidence_n=1)
                     return self._send(200, res)
 
             if path.startswith("/gov"):
