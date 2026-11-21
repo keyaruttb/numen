@@ -332,7 +332,8 @@ GATE_WRITE_POST = frozenset((
     "/narrative/write",   # 写我自己那一段叙事
     "/feedback", "/review/run", "/review/confirm",   # V9.0 反馈环
     "/act",   # V9.4 立刻把意向做掉一次,
-    "/gov/decide", "/gov/mark", "/speech_policy/update", "/distill/run", "/contemplate", "/contemplate/keep", "/self_review/run", "/self_model/propose", "/self_model/apply", "/self_model/revoke",
+    "/gov/decide",
+    "/relation/tag", "/gov/mark", "/speech_policy/update", "/distill/run", "/contemplate", "/contemplate/keep", "/self_review/run", "/self_model/propose", "/self_model/apply", "/self_model/revoke",
     "/hormone/feedback",
     "/speech_policy",
 ))
@@ -2055,6 +2056,34 @@ class Handler(BaseHTTPRequestHandler):
                                                    evidence_n=1)
                     return self._send(200, res)
 
+            if path in ("/topics", "/topics/stats"):
+                try:
+                    import topics as _tp4
+                    _n = int((qs.get("limit") or ["3"])[0])
+                    _d = float((qs.get("days") or ["4"])[0])
+                    if path == "/topics/stats":
+                        return self._send(200, {"ok": True, "stats": _tp4.stats(m.card.db)})
+                    return self._send(200, {"ok": True, "items": _tp4.recent(m.card.db, limit=_n, days=_d),
+                                            "line": _tp4.render(m.card.db, limit=_n, days=_d)})
+                except Exception as e:
+                    return self._send(500, {"ok": False, "error": repr(e)[:160]})
+            if path == "/relation/layers":
+                try:
+                    _uid = (qs.get("uid") or [""])[0]
+                    return self._send(200, {"ok": True, "uid": _uid, "layer": m.card.person_layer_of(uid=_uid)})
+                except Exception as e:
+                    return self._send(500, {"ok": False, "error": repr(e)[:160]})
+            if path == "/relation/tag" and method == "POST":
+                try:
+                    body = self._body() or {}
+                    with m.lock:
+                        r = m.card.role_tag(str(body.get("person") or ""), str(body.get("role") or ""),
+                                            layer=str(body.get("layer") or "friend"),
+                                            note=str(body.get("note") or ""),
+                                            uid=str(body.get("uid") or ""))
+                    return self._send(200, r)
+                except Exception as e:
+                    return self._send(500, {"ok": False, "error": repr(e)[:160]})
             if path.startswith("/gov"):
                 import governance as _gv
                 if method == "GET" and path == "/gov/log":

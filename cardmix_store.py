@@ -47,6 +47,36 @@ import re
 
 
 
+_EMO_BASE = 0.25
+
+
+def _emotion_of(text):
+    """规则打分：这句话有多带情绪（0.05~1.0）。
+
+    为什么不保留 0.25 / 1.0 两档（外部反馈第 ⑦ 条 + 用户 m11864）：
+      落库 2305 条 0.25、246 条 1.0，等于这个字段没信息。这里用四条可解释线索：
+      情感词数量、感叹、疑问、长度；全是能复算的规则，不调模型。
+    影响面：SCORE_W 里 emotion 权重是 0，所以它不动召回排序 —— 修的是字段本身。
+    """
+    t = str(text or "")
+    if not t:
+        return _EMO_BASE
+    v = _EMO_BASE
+    hits = sum(1 for w in EMO_WORDS if w in t)
+    if hits:
+        # 一个情感词就说明这句有态度：0.35 起、每多一个 +0.12，封顶 0.60。
+        v += min(0.60, 0.45 + 0.10 * (hits - 1))
+    if ("！" in t) or ("!" in t):
+        v += 0.15
+    if ("？" in t) or ("?" in t):
+        v += 0.10
+    if len(t) >= 30:
+        v += 0.12
+    if t[:2] in ("嗯，", "嗯。", "哦，", "哦。", "行。"):
+        v -= 0.08
+    return round(max(0.05, min(1.0, v)), 3)
+
+
 def _pid_alive(pid):
     """这个 pid 还活着吗？（Windows 用 OpenProcess，别的平台用 os.kill 0）
 
@@ -124,7 +154,7 @@ class MixStore:
 
         # 情绪强度：从文本里估
         if emotion is None:
-            emotion = 1.0 if any(w in text for w in EMO_WORDS) else 0.25
+            emotion = _emotion_of(text)
         # 实体数：地点 + 数字
         if entities is None:
             entities = len(RE_PLACE.findall(text)) + len(RE_NUM.findall(text))
@@ -872,10 +902,14 @@ class MixStore:
         now = float(now if now is not None else time.time())
         c = self.db
         try:
-            n1 = c.execute("DELETE FROM worklog WHERE kind='work' AND ts < ?",
-                           (now - days_work * 86400.0,)).rowcount
+            # V10.7：迁移来的历史（source=migrated:*）不动 —— 那是来时路，不是工作台。
+            n1 = c.execute(
+                "DELETE FROM worklog WHERE kind='work' AND ts < ?"
+                " AND COALESCE(source,'') NOT LIKE 'migrated:%'",
+                (now - days_work * 86400.0,)).rowcount
             n2 = c.execute(
-                "DELETE FROM worklog WHERE kind!='work' AND ts < ?",
+                "DELETE FROM worklog WHERE kind!='work' AND ts < ?"
+                " AND COALESCE(source,'') NOT LIKE 'migrated:%'",
                 (now - days_keep * 86400.0,)).rowcount
             c.commit()
             return int(n1 or 0) + int(n2 or 0)

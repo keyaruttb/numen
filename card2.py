@@ -3287,6 +3287,22 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             pass
         return len(ids)
 
+    def recent_topics(self, limit=3, days=4.0, now=None):
+        """最近聊到的几件事（话题层）。不参与召回、不参与衰减，只给上下文末尾一格。"""
+        try:
+            import topics as _tp2
+            return _tp2.recent(self.db, limit=limit, days=days, now=now)
+        except Exception:
+            return []
+
+    def topic_line(self, limit=3, days=4.0, now=None):
+        """给 prompt 用的一行；没有就返回空串（不占预算）。"""
+        try:
+            import topics as _tp3
+            return _tp3.render(self.db, limit=limit, days=days, now=now)
+        except Exception:
+            return ""
+
     def dream_commit(self, items, dialogue_ids=None, speaker="self", key=None, force=False):
         """五阶段提交：ingest → summarize → link → validate → commit。
 
@@ -3418,6 +3434,27 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 "UPDATE dream_batch SET state='done', stage='commit', n_written=?,"
                 " written=?, updated_ts=? WHERE key=?",
                 (len(written), json.dumps(written), float(self.clock.now()), key))
+            # V10.7：批次也记下「这批对话发生在什么时候」
+            try:
+                _cts = 0.0
+                if ids:
+                    _q = ",".join("?" for _ in ids)
+                    _r = self.db.execute(
+                        "SELECT MAX(ts) FROM dialogue WHERE id IN (%s)" % _q,
+                        tuple(ids)).fetchone()
+                    _cts = float((_r[0] if _r else 0) or 0)
+                self.db.execute("UPDATE dream_batch SET conv_ts=? WHERE key=?",
+                                (_cts or float(self.clock.now()), key))
+                self.db.commit()
+            except Exception as _e:
+                soft_fail("dream_conv_ts_set", _e, "批次 conv_ts 写入失败")
+            # V10.7：话题层 —— 这批压出来的第一主题，记成「最近聊到」
+            try:
+                import topics as _tp1
+                _lab = (clean[0]["text"] if clean else "")[:16]
+                _tp1.touch(self.db, _lab, written, now=float(self.clock.now()))
+            except Exception as _e:
+                soft_fail("topics_touch", _e, "话题落批失败")
             self.db.commit()
             self._invalidate_idf()
             return {"ok": True, "key": key, "written": written, "n": len(written),
@@ -4703,6 +4740,19 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         except Exception as _le:
             print("[card2] 学习队列表建失败: %s" % _le)
         try:
+            # 2026-11-22 V10.7：话题层（最近聊到）。
+            import topics as _tp0
+            _tp0.ensure(self.db)
+        except Exception as _te:
+            print("[card2] 话题表建失败: %s" % _te)
+        try:
+            _cols = [r[1] for r in self.db.execute("PRAGMA table_info(dream_batch)")]
+            if "conv_ts" not in _cols:
+                self.db.execute("ALTER TABLE dream_batch ADD COLUMN conv_ts REAL NOT NULL DEFAULT 0")
+                self.db.commit()
+        except Exception as _ce:
+            print("[card2] dream_batch 补 conv_ts 失败: %s" % _ce)
+        try:
             # 2026-11-20 V9.3：评价印象层（affect 表）。
             import impression_eval as _aff
             _aff.ensure(self.db)
@@ -5472,6 +5522,18 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                             ("朋友", "friend"), ("认识", "known")):
                 if kw in txt:
                     return lay
+        # V10.7：core_tag 还没建过（新卡常见）→ 用「关于他的记忆」里最常标的层兜底。
+        try:
+            if uid:
+                r2 = c.execute(
+                    "SELECT about_layer, COUNT(*) AS n FROM mem"
+                    " WHERE about_uid=? AND COALESCE(about_layer,'')<>''"
+                    " GROUP BY about_layer ORDER BY n DESC LIMIT 1",
+                    (str(uid),)).fetchone()
+                if r2 and (r2["about_layer"] or "").strip():
+                    return str(r2["about_layer"]).strip()
+        except Exception:
+            pass
         return ""
 
     def role_tag(self, person, role, layer="friend", note="", uid=""):
@@ -8492,6 +8554,14 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 sections["round_hint"] = len(_rtxt)
                 self._round_blk = _blk2
 
+        # V10.7：最近聊到（话题层）。它是「锚」，不是证据 —— 预算紧时第一个让位。
+        try:
+            _tl = self.topic_line(limit=3, days=4.0)
+            if _tl:
+                out.append("【最近聊到】\n" + _tl)
+                sections["topics"] = len(_tl)
+        except Exception:
+            pass
         text = "\n\n".join(out)
         # V9.6：预算真爆了按「有多可惜」从低到高让位，不再一上来就砍【说话方式】。
         #   2026-11-20 修：线上 prompt 平时就 6800~7000 字（人格整段 + 近上下文），
@@ -8499,6 +8569,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         #   顺序：工作台 → 旧账 → 联想 → 事实/期待/欲望 → 时间 → 本轮倾向 → 策略格。
         #   人格、长期、证据、此刻，永不在让位名单里。
         _EVICT = (
+            ("【最近聊到】", "topics"),
             ("【最近在做的事】", "worklog"),
             ("【很久以前的事（翻旧账翻到的）】", "archive"),
             ("【关联想起】", "assoc_link"),
