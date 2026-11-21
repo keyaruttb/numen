@@ -3961,6 +3961,27 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         return _ct.add(self, source, title, quote, about_world, about_self,
                        tags=tags, now=now)
 
+    def thought_line(self, max_chars=60):
+        """最近在读/在想的一句话（来自思考层）。给我自己看，不是给他看。"""
+        if os.environ.get("WHALE_THOUGHT", "1") == "0":
+            return ""
+        try:
+            import contemplate as _ct
+            rows = _ct.recent(self, limit=8)
+        except Exception:
+            return ""
+        for r in rows or []:
+            if (r.get("flag") or "").strip():
+                continue
+            txt = (r.get("about_self") or "").strip()
+            if len(txt) < 12:
+                continue
+            if r.get("state") == "kept":
+                return txt[:max_chars]
+            if len(txt) >= 20:
+                return txt[:max_chars]
+        return ""
+
     def thoughts(self, limit=10):
         import contemplate as _ct
         return _ct.recent(self, limit=limit)
@@ -3981,13 +4002,20 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         return out
 
     def persona_lines(self, limit=None):
-        """可塑区：只有 active 的条目才进 prompt。"""
+        """可塑区：只有 active 的条目才进 prompt。尾行带一句「最近在想」。"""
+        out = []
         try:
             import selfmodel as _sm
-            return _sm.persona_lines(self, limit=limit)
+            out = list(_sm.persona_lines(self, limit=limit) or [])
         except Exception as exc:
             print("[card2] 可塑区读取失败：%s" % exc)
-            return []
+        try:
+            _th = self.thought_line()
+        except Exception:
+            _th = ""
+        if _th:
+            out.append("最近在想：%s" % _th)
+        return out
 
     def promote_frequent(self, need=None, limit=None, now=None):
         """把「被想起来很多天」的中期记忆升到 keep（2026-11-21，E1 发现）。
