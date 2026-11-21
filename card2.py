@@ -3996,6 +3996,12 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             out["review"] = _sm.weekly_review(self, now=now, force=force)
             out["model"] = _sm.build_self_model(self, now=now)
             out["synced"] = _sm.sync_state(self)
+            try:
+                import contemplate as _ct2
+                out["persona"] = _ct2.propose_from(self, now=now)
+            except Exception as exc:
+                print("[card2] 思考转可塑区失败：%s" % exc)
+                out["persona"] = []
         except Exception as exc:
             print("[card2] 自省失败：%s" % exc)
             out["err"] = str(exc)[:200]

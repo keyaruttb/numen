@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS contemplation (
     tags      TEXT NOT NULL DEFAULT '[]',
     state     TEXT NOT NULL DEFAULT 'pending',
     flag      TEXT NOT NULL DEFAULT '',
-    mem_id    INTEGER NOT NULL DEFAULT 0
+    mem_id    INTEGER NOT NULL DEFAULT 0,
+    proposed  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_cont_ts ON contemplation(ts);
 """
@@ -46,6 +47,13 @@ _CRITIC = ("但我", "可是我", "问题", "毛病", "其实我", "我没做到
 
 def ensure(conn):
     conn.executescript(_DDL)
+    try:
+        cols = {r[1] for r in conn.execute('PRAGMA table_info(contemplation)')}
+        if 'proposed' not in cols:
+            conn.execute('ALTER TABLE contemplation ADD COLUMN proposed INTEGER NOT NULL DEFAULT 0')
+            conn.commit()
+    except Exception:
+        pass
     conn.commit()
 
 
@@ -104,6 +112,40 @@ def keep(card, cid):
     card.db.execute("UPDATE contemplation SET state='kept' WHERE id=?", (int(cid),))
     card.db.commit()
     return {"ok": True, "id": int(cid), "state": "kept"}
+
+
+def propose_from(card, limit=2, min_len=40, now=None):
+    """把「已经留下的思考」转成可塑区提案（pending，还要我点头才生效）。
+
+    为什么要有这一步：原来只有 propose_persona 这个函数，没有任何调用方 ——
+    「读完 → 思考 → 我变了」在图上连着，代码里断在最后一步。
+    """
+    import selfmodel as sm
+    ensure(card.db)
+    c = card.db
+    out = []
+    try:
+        rows = c.execute(
+            "SELECT id, title, about_self FROM contemplation "
+            "WHERE state='kept' AND proposed=0 AND flag='' "
+            "AND LENGTH(about_self)>=? ORDER BY ts DESC LIMIT ?",
+            (int(min_len), int(limit))).fetchall()
+    except Exception as exc:
+        return [{"ok": False, "err": str(exc)[:160]}]
+    for r in rows:
+        cid, title, about_self = int(r[0]), (r[1] or ""), (r[2] or "")
+        key = "thought.%d" % cid
+        try:
+            pr = sm.persona_propose(card, key, about_self[:120],
+                                    why="来自一条思考：%s" % (title or "无标题"),
+                                    evidence_n=1, now=now)
+        except Exception as exc:
+            out.append({"ok": False, "id": cid, "err": str(exc)[:160]})
+            continue
+        c.execute("UPDATE contemplation SET proposed=1 WHERE id=?", (cid,))
+        c.commit()
+        out.append({"ok": True, "id": cid, "key": key, "proposal": pr})
+    return out
 
 
 def propose_persona(card, cid, key, value, why=""):
