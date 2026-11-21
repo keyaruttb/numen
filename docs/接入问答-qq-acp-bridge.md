@@ -189,3 +189,28 @@ else:
 | `docs/接入问答-qq-acp-bridge.md` | 就是本文 |
 
 跑示例最小要求：Python 3.10+、`pip install aiohttp`、一个有 `acp` app 的 profile、NapCat 的 HTTP API 开着（同机默认 6700）。
+
+---
+
+## 8. 顺手做的全系统体检（2026-11-21 晚）
+
+因为你在报 bug，我把整机静态扫了一遍（`D:\` 下 407 个 `.py`，跳过 venv/模型/备份目录），然后跑了测试与线上只读面。
+
+**结果：**
+
+| 项 | 结果 |
+|---|---|
+| 语法/编译 | 407 个文件，**0 失败** |
+| 单元测试 `tests/test_card2.py` | **19 / 19 通过** |
+| 线上只读路由 | 15 条全 200（`/health`、`/turn/stats`、`/gov/stats`、`/outbox/stats`、`/distill/stats`、`/self_review`、`/self_model`、`/contemplate`、`/audit/stats`、`/intentions`、`/feedback/stats`、`/retention`、`/speech_policy/snapshot`、`/hormone/feedback`、`/dream/pending`） |
+| 写路径幂等 | `turn_id` 重复提交返回 `duplicate:true`，不双写（这条之前在探针里验过） |
+
+**抓到两个真问题（都已修）：**
+
+1. **`D:\tools\watch_wake.py:69` 和你报的是同一个 bug。** 仓库里那份我先修了，但**工具目录里实际在跑的那份漏了**——同一个坑两处出现，说明「修配置副本、没修部署副本」这种漂移是真会发生的。两处现在都是 `return 2`。
+2. **`D:\cardtext.py` 里 `split_memory` 定义了两次**（611 行与 697 行）。后一份把前一份整个盖掉，两份**只差一行**：后一份多了 `from body import EMO_WORDS  # 懒取：避免 cardtext ↔ body 成环`。也就是说前一份是纯死代码（116 行），而且它内部引用了 `EMO_WORDS` 却没有 import——**如果有人哪天删掉后一份，前一份一调用就 `NameError`**。已删除死的那份，并把 import 挪到 docstring 之后（放在 docstring 前面会让那段字符串不再是 docstring）。备份：`cardtext.py.bak-dup2-<ts>`。
+
+**一个误报（说明一下，免得你以为是 bug）：** 静态扫描把 `card2.py` 里 `MemoryCard.db` 报成重复定义，实际是 `@property` + `@db.setter` 一对，Python 允许且必需。
+
+**留作后续风险点、这次没动：** `except ...: pass` 的密度——`card2.py` 81 处、`mind_server.py` 35 处、`console.py` 29 处、`feedback_loop.py` 21 处。它们大多是有意的「可选功能失败不影响主链」，但**数量到这个级别，就意味着「静默退化」是这套系统的默认失效模式**（我们的论文里 F1/F3/F5/F8 都是这一类）。真要治，方向不是把它们全改成抛异常，而是给「关键路径」加一层显式的失败留痕（我们已经有 `write_outbox`、`/health.bus`、`/audit`、`self_review` 的 error 状态，可以继续往这个方向收）。
+
