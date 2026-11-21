@@ -912,6 +912,10 @@ def _brief_line(raw, limit=110):
 
 
 SCORE_W = (0.35, 0.30, 0.00, 0.00)
+# 后两项是「权重项」与「新近项」，不是下面并集的另外两路。
+# 2026-11-21 有人问过这个：注释夸并集、代码却把它们归零，看着像改到一半。
+# 实际情况 —— 并集（RRF）端到端只有 46.6%，比单路余弦的 50.2% 还低（+1 在噪声内），
+# 所以并集留在实验开关里（WHALE_UNION），生产打分只保留语义 + 字面。
 
 # ---- V9 候选并集（2026-11-19）------------------------------------------
 # 417 题实测（bench，只读副本）：单通道语义 50.2% / 分块 46.9% / 字面 39.3%，
@@ -4693,6 +4697,12 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         except Exception:
             pass
         try:
+            # 2026-11-21：周自省还依赖 learn_task —— 没跑过学习队列的新卡会 no such table
+            import learn as _ln
+            _ln.ensure(self.db)
+        except Exception as _le:
+            print("[card2] 学习队列表建失败: %s" % _le)
+        try:
             # 2026-11-20 V9.3：评价印象层（affect 表）。
             import impression_eval as _aff
             _aff.ensure(self.db)
@@ -4904,14 +4914,16 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                  json.dumps(top or [], ensure_ascii=False),
                  json.dumps(picked or [], ensure_ascii=False),
                  int(n_lines or 0), int(ms or 0)))
-            c.commit()
+            self.db.commit()          # 2026-11-21：Cursor 没有 commit()，这里是 AttributeError
             rid = c.lastrowid
             # 只留最近 keep 条：这是排错用的窗口，不是账本
             c.execute("DELETE FROM recall_trace WHERE id <= ?",
                       (int(rid) - int(keep),))
-            c.commit()
+            self.db.commit()
             return rid
-        except Exception:
+        except Exception as _e:
+            # 以前这里直接 return None：整条漏斗静默失效，最需要它的时候恰好没有它
+            soft_fail("recall_trace", _e)
             return None
 
     def recall_trace_recent(self, n=10):

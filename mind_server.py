@@ -861,6 +861,13 @@ class Mind(object):
             # 为什么必须进 mem 而不是只存原文：
             #   原文表不参与召回。只存原文的话，「三天内几乎不遗忘」这条
             #   根本用不上 —— 因为压根没东西可遗忘，下次说话翻不到。
+            # 2026-11-21：去重要能看出来。先记「写之前的最大 id」——
+            # 比拿 create_ts 跟墙钟比可靠：卡的时钟是 flow_time，不是墙钟。
+            try:
+                _max_before = int(self.card.db.execute(
+                    "SELECT COALESCE(MAX(id),0) FROM mem").fetchone()[0])
+            except Exception:
+                _max_before = 0
             mid = self.card.remember(user_message, ts=ts, source=source,
                                  about_uid=self.local_uid)
             # 出生证：记忆落库就上链（只锁出生那一刻，不锁权重）
@@ -918,7 +925,12 @@ class Mind(object):
                                  reply_mid=reply_mid or 0, state="done")
             except Exception as _te:
                 print("[mind] 轮次收尾失败：%s" % _te, file=sys.stderr)
-            return {"mem_id": mid, "reply_mem_id": reply_mid, "turn_id": _tid}
+            # 2026-11-21：去重命中时 remember() 返回的是旧行 id，调用方分不出
+            # 「新写」与「复用」，靠「上一句说了什么」的机制会取错。这里显式标出来。
+            _dedup = [int(_m) for _m in (mid, reply_mid)
+                      if _m and int(_m) <= _max_before]
+            return {"mem_id": mid, "reply_mem_id": reply_mid, "turn_id": _tid,
+                    "deduped": bool(_dedup), "deduped_ids": _dedup}
 
     # ---- 短期对话原文：放卡里，不放模型那边 ----
     # 为什么非要在卡里：
@@ -1105,6 +1117,15 @@ def api_token(mind):
             pass
     _TOK["v"] = t
     return t
+
+
+def _soft_fail_snapshot():
+    """静默失败：不只给次数，也给最后一次的错误消息。"""
+    try:
+        import diag as _dg
+        return _dg.soft_fail_snapshot()
+    except Exception as exc:
+        return {"error": str(exc)[:160]}
 
 
 def _bus_health(card):
@@ -1307,6 +1328,7 @@ class Handler(BaseHTTPRequestHandler):
                     # R3（2026-11-20）：信号总线还在不在。降级后 enabled=False，
                     # 带 since_ts 与 reason —— 以前这行只出现在日志里，没人看得见。
                     "bus": _bus_health(m.card),
+                    "soft_fail": _soft_fail_snapshot(),
                     # 语义层只说三件事：模型多少维、卡里多数多少维、能用的占几成。
                     # 「覆盖率」那个数字会骗人 —— 换过模型的卡里，带着向量却
                     # 用不上的老条目也能算成 100%。所以这里报 usable_ratio。

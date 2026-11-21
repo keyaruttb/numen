@@ -271,7 +271,8 @@ class MixStore:
             oxy = max(oxy, self.oxy * 0.5)
 
         # 细节衰减也要按池放慢，否则长期档案一进来细节就全丢了
-        dscale = {POOL_SHORT: 1.0, POOL_MEDIUM: 0.25, POOL_LONG: 0.03}[pool]
+        # 2026-11-21：archive（不进召回）是合法池，原来字典里没有 → KeyError → HTTP 500
+        dscale = {POOL_SHORT: 1.0, POOL_MEDIUM: 0.25, POOL_LONG: 0.03}.get(pool, 0.0)
 
         # 🔧 V5.0 T2-1：主干拆成 主语/动词/宾语，供分级侵蚀用
         _subj, _verb, _obj = split_predicate(core)

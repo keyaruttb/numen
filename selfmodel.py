@@ -160,11 +160,13 @@ def weekly_stats(card, t0, t1):
         "reviews_promoted": _q1(c, "SELECT COUNT(*) FROM review WHERE COALESCE(promoted,0)=1 AND ts>=? AND ts<?", t0, t1),
         "intent_consumed": _q1(c, "SELECT COUNT(*) FROM intention WHERE status='consumed' AND last_touch_ts>=? AND last_touch_ts<?", t0, t1),
         "intent_faded": _q1(c, "SELECT COUNT(*) FROM intention WHERE status='faded' AND COALESCE(last_touch_ts,created_ts)>=? AND COALESCE(last_touch_ts,created_ts)<?", t0, t1),
-        "learn_tasks": _q1(c, "SELECT COUNT(*) FROM learn_task WHERE COALESCE(create_ts,0)>=? AND COALESCE(create_ts,0)<?", t0, t1),
+        # 2026-11-21：learn_task 没有 create_ts 列（DDL 只有 ts/claim_ts/done_ts）
+        "learn_tasks": _q1(c, "SELECT COUNT(*) FROM learn_task WHERE COALESCE(ts,0)>=? AND COALESCE(ts,0)<?", t0, t1),
         "gov_pending": _q1(c, "SELECT COUNT(*) FROM gov_decision WHERE exec_state='pending'"),
     }
+    # 2026-11-21：affect 没有 ts 列（只有 first_ts/last_ts/last_decay_ts）
     row = _qs(c, "SELECT valence, safety, n_pos, n_neg FROM affect"
-                 " WHERE target_kind='person' ORDER BY ts DESC LIMIT 1")
+                 " WHERE target_kind='person' ORDER BY COALESCE(last_ts,0) DESC LIMIT 1")
     out["affect"] = ({"valence": float(row[0][0] or 0), "safety": float(row[0][1] or 0),
                       "n_pos": int(row[0][2] or 0), "n_neg": int(row[0][3] or 0)} if row else {})
     # 负证据的 ref（用于『可审计引用』）
