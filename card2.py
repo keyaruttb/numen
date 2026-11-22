@@ -3764,6 +3764,14 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         except Exception as _xe:
             print("[card2] 中期池出口失败: %s" % _xe)
 
+        # 1.26) 长期池里堆着的闲话下沉（V10.9）：只换池、不删正文。
+        try:
+            _ls = self.long_sink_stale(limit=30, now=now)
+            if _ls.get("moved"):
+                print("[card2] 长期池下沉：%d 条闲话挪进冷档" % _ls["moved"])
+        except Exception as _lse:
+            print("[card2] 长期池下沉失败: %s" % _lse)
+
         # 1.3) 中期小池：够格进长期，否则到期淡出
         for r in c.execute(
                 "SELECT * FROM mem WHERE pool=?", (POOL_MEDIUM_WARM,)).fetchall():
@@ -4150,10 +4158,15 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     continue
                 if w <= 0:
                     continue
+                # V10.9：已经跌破进门线的**不算**出口候选 —— 它们该按淡出/下沉走，
+                # 以前这里给 days_left=0 又把它们全选中，于是每跳 20 条闲话被保险进长期池。
                 if w <= THETA_MEDIUM:
-                    days_left = 0.0
-                else:
-                    days_left = math.log(w / THETA_MEDIUM) / LAM_M / 86400.0
+                    continue
+                # 闲话与短讯不保险：没被主动想起过的，就让它按自己的节奏淡出。
+                if (str(r["region"] or "") in ("chatter", "flash")
+                        and int(r["recall_days"] or 0) <= 0):
+                    continue
+                days_left = math.log(w / THETA_MEDIUM) / LAM_M / 86400.0
                 if days_left <= float(horizon_days):
                     out.append({"id": int(r["id"]), "w": round(w, 3),
                                 "days_left": round(days_left, 1),
@@ -4163,6 +4176,32 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         except Exception as e:
             print("[card2] 中期池出口测算失败: %s" % e)
             return []
+
+    def long_sink_stale(self, limit=30, now=None):
+        """长期池里「从没被想起过的闲话」往下沉一层（只换池不删，V10.9）。
+
+        为什么要有这一条：中期池出口曾经把 w<0.35 的一律保险进长期，
+        实测 813 条长期里有 462 条是闲话、429 条一次都没被想起过 ——
+        占着保险柜、还拖慢每次全量扫。这里按同样的可逆方式挪进冷档。
+        """
+        now = float(now if now is not None else self.clock.now())
+        moved = 0
+        try:
+            c = self.db.cursor()
+            rows = c.execute(
+                "SELECT id, w FROM mem WHERE pool=? AND region IN ('chatter','flash')"
+                " AND COALESCE(recall_days,0)<=0 AND COALESCE(w,0)<0.30"
+                " ORDER BY COALESCE(w,0) ASC LIMIT ?",
+                (POOL_LONG, max(1, int(limit)))).fetchall()
+            for r in rows:
+                c.execute("UPDATE mem SET pool=?, t_anchor=?, pool_in_ts=?"
+                          " WHERE id=?",
+                          (POOL_ARCHIVE, now, now, int(r["id"])))
+                moved += 1
+            self.db.commit()
+        except Exception as e:
+            print("[card2] 长期池下沉落库失败: %s" % e)
+        return {"moved": moved}
 
     def medium_exit_apply(self, horizon_days=0, limit=20, now=None, dry=False):
         """把算出来的前 limit 条挪进长期池。
