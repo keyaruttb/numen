@@ -3611,16 +3611,6 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             })
         return {"on": _REGION_LAMBDA_ON, "regions": out}
 
-    # ---------- 老 ----------
-    def _affect_fade_if_due(self, dt_seconds, now=None):
-        """一天跑一次评价印象褪色（V9.3）。失败不影响主循环。"""
-        try:
-            if float(dt_seconds) < 86400.0:
-                return 0
-            import impression_eval as _aff
-            return _aff.fade(self.db, now=now)
-        except Exception:
-            return 0
 
     def tick(self, dt_seconds, verbose=False):
         """时间流逝：结算权重 → 跨池流转 → 侵蚀 → 回收"""

@@ -1815,6 +1815,32 @@ class Handler(BaseHTTPRequestHandler):
                                     source=str(body.get("source") or "explicit"),
                                     trust_ok=bool(body.get("trust_ok", True)))
                 return self._send(200, {"ok": True, "fb_id": fid})
+            if method == "GET" and path in ("/regions/load", "/core/stats",
+                                           "/dream/due", "/emotion/label"):
+                card = self.mind.card
+                if path == "/regions/load":
+                    payload = card.region_load_snapshot()
+                elif path == "/core/stats":
+                    payload = card.core_stats()
+                elif path == "/dream/due":
+                    payload = card.dream_due()
+                else:
+                    payload = {"label": card.emotion_label()}
+                self._send(200, {"ok": True, "data": payload})
+                return
+            if method == "GET" and path == "/dialogue/of":
+                try:
+                    import urllib.parse as _up3
+                    _q3 = _up3.parse_qs(_up3.urlparse(self.path).query)
+                    _mid = int(_q3.get("mid", ["0"])[0])
+                except Exception:
+                    _mid = 0
+                if _mid <= 0:
+                    self._send(400, {"ok": False, "error": "bad_mid"})
+                    return
+                rows = self.mind.card.get_dialogue(_mid)
+                self._send(200, {"ok": True, "mid": _mid, "items": rows, "n": len(rows)})
+                return
             if method == "POST" and path == "/review/auto_confirm":
                 days = 3.0
                 try:
