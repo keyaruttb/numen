@@ -330,7 +330,7 @@ GATE_WRITE_POST = frozenset((
     "/skill_add", "/skill_use", "/config", "/config_all", "/identity",
     "/identity/set", "/injection", "/avatar", "/shutdown",
     "/narrative/write",   # 写我自己那一段叙事
-    "/feedback", "/review/run", "/review/confirm",   # V9.0 反馈环
+    "/feedback", "/review/run", "/review/confirm", "/review/auto_confirm",   # V9.0 反馈环
     "/act",   # V9.4 立刻把意向做掉一次,
     "/gov/decide",
     "/relation/tag", "/gov/mark", "/speech_policy/update", "/distill/run", "/contemplate", "/contemplate/keep", "/self_review/run", "/self_model/propose", "/self_model/apply", "/self_model/revoke",
@@ -1815,6 +1815,19 @@ class Handler(BaseHTTPRequestHandler):
                                     source=str(body.get("source") or "explicit"),
                                     trust_ok=bool(body.get("trust_ok", True)))
                 return self._send(200, {"ok": True, "fb_id": fid})
+            if method == "POST" and path == "/review/auto_confirm":
+                days = 3.0
+                try:
+                    import urllib.parse as _up2
+                    _q2 = _up2.parse_qs(_up2.urlparse(self.path).query)
+                    if _q2.get("days"):
+                        days = float(_q2["days"][0])
+                except Exception:
+                    pass
+                with self.mind.lock:
+                    _r = self.mind.card.feedback.auto_confirm(days=days)
+                self._send(200, {"ok": True, "review": _r, "days": days})
+                return
             if method == "POST" and path == "/review/run":
                 try:
                     body = self._body()

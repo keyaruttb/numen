@@ -1027,6 +1027,7 @@ class FeedbackLoop(object):
             out["affect"] = "err:%s" % e
         try:
             out["reviews"] = self.run_reviews(now=nowv)
+            out["review_confirmed"] = self.auto_confirm(now=nowv)
         except Exception as e:
             out["reviews"] = "err:%s" % e
         try:
@@ -1159,6 +1160,47 @@ class FeedbackLoop(object):
                 self._upsert_intention(mem_id=mid, direction="avoid",
                                        kind="self_check", drive="order",
                                        urge=urge * 0.4, note="复盘：有点不稳，留意")
+
+    # ---- 复盘自动确认（V10.10）----
+    # 为什么要有这一条：`confirm_review()` 原来只有 HTTP 路由，没有人会去点它，
+    # 于是 review 表里 promoted=1 / confirmed=0 一直挂在半路（198 组里 0 条确认）。
+    # 这里用的是「时间 + 结构」而不是模型判断：晋升满 3 天、期间没有新的反证，
+    # 就当作站得住；每条都写 gov_decision 留痕，人工仍可改回 confirmed=0。
+    _REVIEW_AUTOCONF_MARK = True
+
+    def auto_confirm(self, days=3.0, now=None, limit=20):
+        """把晋升满 days 天、仍待确认的复盘结掉；返回 {"confirmed": n, "ids": [...]}。"""
+        nowv = float(now if now is not None else self._now())
+        days = 3.0 if days is None else float(days)
+        try:
+            rows = self.db.execute(
+                "SELECT id, mem_id, strength FROM review"
+                " WHERE promoted=1 AND COALESCE(confirmed,0)=0 AND ts <= ?"
+                " ORDER BY ts ASC LIMIT ?",
+                (nowv - days * 86400.0, int(limit))).fetchall()
+        except Exception as e:
+            print("[feedback] 复盘自动确认读表失败：%s" % e)
+            return {"confirmed": 0, "ids": []}
+        ids = []
+        for r in rows:
+            try:
+                self.db.execute(
+                    "UPDATE review SET confirmed=1, ts_reviewed=? WHERE id=?",
+                    (nowv, int(r["id"])))
+                self.db.commit()
+                ids.append(int(r["id"]))
+            except Exception as e:
+                print("[feedback] 复盘确认失败 id=%s：%s" % (r["id"], e))
+                continue
+            try:
+                import governance as _gvr
+                _gvr.decide(self.db, "review", int(r["id"]), "accept",
+                            reason="复盘晋升 %.2f，满 %g 天无新反证，结构确认"
+                                   % (float(r["strength"] or 0), days),
+                            source="review_auto", now=nowv)
+            except Exception:
+                pass
+        return {"confirmed": len(ids), "ids": ids}
 
     def confirm_review(self, review_id, confirmed=1):
         try:
