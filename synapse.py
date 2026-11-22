@@ -591,8 +591,8 @@ class SynapseNet(object):
         for mid in ids:
             try:
                 conns = c.execute(
-                    "SELECT rowid, weight, fire_count FROM synapse"
-                    " WHERE a=? OR b=?", (mid, mid)).fetchall()
+                    "SELECT id, weight, fire_count FROM synapse"
+                    " WHERE a_id=? OR b_id=?", (mid, mid)).fetchall()
             except Exception:
                 continue
             for row in conns:
@@ -600,8 +600,8 @@ class SynapseNet(object):
                     w = max(0.1, float(row["weight"] or 0.1) * float(factor))
                     fc = max(0, int(row["fire_count"] or 0) - 1)
                     c.execute("UPDATE synapse SET weight=?, fire_count=?,"
-                              " last_touch=? WHERE rowid=?",
-                              (w, fc, now, int(row["rowid"])))
+                              " last_fire_ts=? WHERE id=?",
+                              (w, fc, now, int(row["id"])))
                     n += 1
                 except Exception:
                     pass

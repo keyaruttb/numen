@@ -111,7 +111,69 @@ def _pid_alive(pid):
         return False
 
 
+
+
+def _split_for_chunks(text, lo=120, hi=240, cap=4):
+    """把一段原文切成 120~240 字的块（按句号类标点切，超长再硬切）。
+
+    为什么要有这一步：chunk 表原来只有早期一次性脚本灌进去的历史块
+    （backfill 214、qq 461、study 329…），新写的记忆一条都不切，
+    于是块检索永远只能翻到老账。
+    """
+    t = (text or "").strip()
+    if len(t) < 40:
+        return []
+    parts, buf = [], ""
+    for ch in t:
+        buf += ch
+        if ch in "。！？；\n" and len(buf) >= lo:
+            parts.append(buf.strip())
+            buf = ""
+    if buf.strip():
+        parts.append(buf.strip())
+    out = []
+    for seg in parts:
+        while len(seg) > hi:
+            out.append(seg[:hi])
+            seg = seg[hi:]
+        if seg:
+            out.append(seg)
+    merged = []
+    for seg in out:
+        if merged and len(merged[-1]) < lo and len(merged[-1]) + len(seg) <= hi:
+            merged[-1] += seg
+        else:
+            merged.append(seg)
+    return [x for x in merged if len(x) >= 20][:cap]
+
 class MixStore:
+
+    def _write_chunks(self, c, mid, text, speaker="", core="", ts=None):
+        """给刚写的记忆切块 + 存 768 维向量。失败不影响正文（调用方兜软失败）。"""
+        try:
+            n = c.execute("SELECT COUNT(*) FROM chunk WHERE mem_id=?",
+                          (mid,)).fetchone()[0]
+        except Exception:
+            n = 0
+        if n:
+            return 0
+        segs = _split_for_chunks(text)
+        if not segs:
+            return 0
+        made = 0
+        for i, seg in enumerate(segs):
+            try:
+                blob = self.semantic.encode(embed_text_for(seg, speaker, core))
+            except Exception:
+                continue
+            if not blob or len(blob) != 3072:
+                continue
+            c.execute("INSERT INTO chunk(mem_id,seq,text,ts,source,emb)"
+                      " VALUES(?,?,?,?,?,?)",
+                      (int(mid), i, seg, ts, "write", blob))
+            made += 1
+        return made
+
     def remember(self, text, salience=0.6, ts=None, pool=None,
                  oxy=0.0, entities=None, emotion=None, normalize=True,
                  region=None, speaker=None, mtype=None, source="",
@@ -386,6 +448,12 @@ class MixStore:
         self.db.commit()
         # 语义近邻：拿刚存的 emb 直接算，不重新编码。放在 commit 之后，
         # 补边失败也不能连累这条记忆本身。
+        # 2026-11-22（外部评审 §2.2）：新记忆也要切块，否则块检索只翻得到历史账。
+        if os.environ.get("WHALE_CHUNK_WRITE", "1") not in ("0", "false", "off"):
+            try:
+                self._write_chunks(c, mid, text, speaker, core, at)
+            except Exception as _ce:
+                soft_fail("chunk_write", _ce, "切块失败")
         if _emb is not None:
             try:
                 self.synapse.add_semantic_edges([mid], [_emb])

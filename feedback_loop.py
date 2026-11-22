@@ -436,10 +436,16 @@ class FeedbackLoop(object):
         return self.settle(fid, severity=severity, trust_ok=trust_ok, now=now, **kw)
 
     # ---------------- ④ 落地链路 ----------------
-    def _apply_inline(self, row, r, sev, level, now=None):
-        """顺序执行七步（总线不可用时的兜底；原来就是这份）。"""
+    def _apply_inline(self, row, r, sev, level, now=None, skip=None):
+        """顺序执行七步（总线不可用时的兜底；原来就是这份）。
+
+        2026-11-22（外部评审 B4）：总线派发到一半炸掉时，前面几步已经写库了，
+        原先直接调这里会把它们再做一遍 —— 同一笔 r 结算两次。加 skip：
+        已经成功跑过的步名传进来，只补没跑的。
+        """
         row = dict(row) if row is not None and not isinstance(row, dict) else (row or {})
         steps = {}
+        _skip = set(skip or ())
         mid = row.get("mem_id")
         for name, fn in (
                 ("hormone", lambda: self._apply_hormone(r, sev)),
@@ -450,6 +456,9 @@ class FeedbackLoop(object):
                 ("motiv", lambda: self._apply_motiv(r, sev)),
                 ("intention", lambda: self._make_intentions(row, r, sev, now)),
                 ("affect", lambda: self._apply_affect(row, r, sev, now))):
+            if name in _skip:
+                steps[name] = "skipped:done"
+                continue
             try:
                 steps[name] = fn()
             except Exception as e:
@@ -534,12 +543,12 @@ class FeedbackLoop(object):
         bus = self._bus()
         if bus is None:
             return self._apply_inline(row, r, sev, level, now)
+        steps = {}
         try:
             import signalbus as sb
             mid = row.get("mem_id")
             payload = {"row": row, "mid": mid, "r": r, "sev": sev, "level": level,
                        "now": now, "card": self.card}
-            steps = {}
             bus.dispatch(sb.EV_HORMONE_TAP, payload)
             steps["hormone"] = payload.get("out_hormone")
             bus.dispatch(sb.EV_MEM_REINFORCE if float(r) >= 0 else sb.EV_MEM_WEAKEN, payload)
@@ -565,7 +574,9 @@ class FeedbackLoop(object):
         except Exception as e:
             print("[feedback] 总线派发失败，退回顺序结算：%s" % e)
             self._mark_bus_disabled("dispatch: %s" % e)
-            return self._apply_inline(row, r, sev, level, now)
+            _done = {k for k, v in (steps or {}).items()
+                     if v and not (isinstance(v, str) and v.startswith("err:"))}
+            return self._apply_inline(row, r, sev, level, now, skip=_done)
 
     # ---- 适配器：签名统一 (sig) -> 返回值写进 payload["out_*"] --------------
     def _h_hormone(self, sig):
@@ -941,6 +952,35 @@ class FeedbackLoop(object):
         return True
 
     # ---------------- ⑦ 夜间反思 ----------------
+
+    def expire_open(self, days=3.0, now=None, limit=50):
+        """B5：挂了几天还没等到反应的「我说的话」，按「无信号」结 0，而不是被丢掉。
+
+        为什么不是 drop_stale：丢弃等于「这件事实在没发生过」，可它确实说过；
+        结 0 才会进 learn_eval / 意向那条链的「中性」分支，也才留得住痕迹。
+        """
+        nowv = float(now if now is not None else self._now())
+        cut = nowv - float(days) * 86400.0
+        try:
+            rows = self._rows(
+                "select id from feedback where status='open'"
+                " and kind='self_utterance' and ts_action < ?"
+                " order by ts_action asc limit ?", (cut, int(limit)))
+        except Exception as e:
+            return {"settled": 0, "err": str(e)}
+        done, errs = 0, []
+        for r in rows:
+            try:
+                out = self.settle(int(r["id"]), note="到期无信号（%g 天）" % float(days),
+                                  now=nowv)
+                if out.get("ok", True):
+                    done += 1
+                else:
+                    errs.append(out)
+            except Exception as e:
+                errs.append(str(e))
+        return {"settled": done, "errors": errs[:3]}
+
     def drop_stale(self, days=3.0, now=None):
         """过期未结算的 open 直接标 dropped：没有证据的评价不该一直挂着。"""
         now = float(now or self._now())
@@ -967,6 +1007,8 @@ class FeedbackLoop(object):
                     "next_in_h": round(gap_h - (nowv - last) / 3600.0, 2)}
         out = {"ran": True, "now": round(nowv, 3)}
         try:
+            # B5：先按「无信号」结账（保住痕迹），再把真正没人要的丢掉
+            out["expired"] = self.expire_open(now=nowv)
             out["dropped"] = self.drop_stale(now=nowv)
         except Exception as e:
             out["dropped"] = "err:%s" % e

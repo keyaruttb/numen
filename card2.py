@@ -3269,16 +3269,21 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         return hit, lost
 
     def _dream_rollback(self, mids):
-        """把刚写的摘要撤干净：正文、出生证、分块。"""
+        """把刚写的摘要撤干净：正文、出生证、分块、突触边。"""
         ids = [int(m) for m in (mids or [])]
         if not ids:
             return 0
         q = ",".join("?" for _ in ids)
-        for sql in ("DELETE FROM mem WHERE id IN (%s)" % q,
-                    "DELETE FROM mem_birth WHERE mid IN (%s)" % q,
-                    "DELETE FROM chunk WHERE mem_id IN (%s)" % q):
+        # 2026-11-22（外部评审 B7）：原先只撤 mem/mem_birth/chunk，
+        # 这一批若建过 synapse 边，会留下指向已删记忆的悬空边（扩散时踩空）。
+        for sql, args in (
+                ("DELETE FROM mem WHERE id IN (%s)" % q, tuple(ids)),
+                ("DELETE FROM mem_birth WHERE mid IN (%s)" % q, tuple(ids)),
+                ("DELETE FROM chunk WHERE mem_id IN (%s)" % q, tuple(ids)),
+                ("DELETE FROM synapse WHERE a_id IN (%s)" % q, tuple(ids)),
+                ("DELETE FROM synapse WHERE b_id IN (%s)" % q, tuple(ids))):
             try:
-                self.db.execute(sql, tuple(ids))
+                self.db.execute(sql, args)
             except Exception:
                 pass
         try:
@@ -3867,7 +3872,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             _over = _kn - _keep_max
             rows = c.execute(
                 "SELECT id, w, pin, COALESCE(t_last_recall, t_anchor, 0) AS lr FROM mem"
-                " WHERE tier=? AND dead=0 ORDER BY w ASC, lr ASC LIMIT ?",
+                " WHERE tier=? AND dead=0 ORDER BY w ASC, lr ASC, id ASC LIMIT ?",
                 (TIER_PROTECTED, _over * 2)).fetchall()
             _demoted = 0
             for r in rows:

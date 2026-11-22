@@ -150,7 +150,11 @@ def main():
             except Exception:
                 return str(getattr(h, "raw", "") or "")
 
-        rels = [1 if relevant(_raw(h), ev_wins) else 0 for h in hits]
+        # 2026-11-22（外部评审 §5.1）：recall 会顺着突触追加「联想尾巴」，返回值可能比
+        # top_k 长。R@K / MRR 必须只看前 K 条，否则分数被尾巴抬高。
+        hit_k = hits[:K]
+        rels_all = [1 if relevant(_raw(h), ev_wins) else 0 for h in hits]
+        rels = rels_all[:K]
 
         t1 = time.time()
         ctx = card.assemble_context(e["question"], identity="", recent_lines=None,
@@ -162,7 +166,7 @@ def main():
 
         first = next((j for j, r in enumerate(rels) if r), None)
         rr = 1.0 / (first + 1) if first is not None else 0.0
-        ndcg = dcg(rels[:10]) / dcg([1] * sum(rels[:10])) if any(rels[:10]) else 0.0
+        ndcg = dcg(rels_all[:10]) / dcg([1] * sum(rels_all[:10])) if any(rels_all[:10]) else 0.0
 
         rows.append({"id": e["id"], "r1": rels[0] if rels else 0,
                      "r3": 1 if any(rels[:3]) else 0, "rK": in_recall,

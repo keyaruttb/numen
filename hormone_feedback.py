@@ -105,14 +105,28 @@ class Regulator:
 
     # ------------------------------------------------------------ 阈值
     def _rel_eff(self, hk):
-        """释放阈值：绝对值与「基线 + 余量」取大，夹在 sat_th 之内。"""
+        """释放阈值：绝对值与「基线 + 余量」取大。"""
+        return self._thr(hk)[0]
+
+    def _thr(self, hk):
+        """返回 (释放线, 饱和线)。
+
+        2026-11-22（外部评审 A5）：原来是 ``min(max(rel_th, 基线+余量), 饱和线-0.02)``，
+        基线高过「饱和线-0.02」时释放线会被压到基线以下 —— 一进抑制就再也回不来
+        （gain 永远回不到 1.0）。这里改成「顶破就抬饱和线」：释放线始终高于基线一个
+        余量，饱和线始终比释放线高 0.02。真实四维基线（0.66/0.48/0.20/0.50）都够低，
+        所以这条只在配置被改坏时生效。
+        """
         base = float(hormone.H_BASE.get(hk, 0.5))
         try:
             base = float(hormone.bases_at(None).get(hk, base))
         except Exception:
             pass
         rel = max(float(self.cfg["rel_th"]), base + float(self.cfg["rel_margin"]))
-        return min(rel, sat_of(hk, self.cfg) - 0.02)
+        sat = sat_of(hk, self.cfg)
+        if rel >= sat - 0.02:
+            sat = rel + 0.02
+        return rel, sat
 
     # ------------------------------------------------------------ 状态机
     def tick(self, hs, dt_hours=1.0):
@@ -130,8 +144,7 @@ class Regulator:
         for short, hk in KEY_MAP.items():
             st = self.states[short]
             level = float(hs.get(hk, hormone.H_BASE.get(hk, 0.5)))
-            rel = self._rel_eff(hk)
-            sat = sat_of(hk, self.cfg)   # 2026-11-21：阈值按激素分档
+            rel, sat = self._thr(hk)   # 2026-11-21 分档 + 2026-11-22 锁死自救
 
             if level >= sat:
                 entering = not st.suppressed

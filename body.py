@@ -62,7 +62,11 @@ def assess_trust(text, card=None):
             name = None
             idn = getattr(card, "identity", None)
             if idn is not None:
-                name = idn.get_core("self_name") or idn.get_live("self_name")
+                # 2026-11-22（外部评审 F9）：卡里写的一直是 card_name（identity.CORE_KEYS
+                # 与 identity_anchor 都是这个键），这里却读 self_name —— 永远取不到，
+                # 于是下面「改名叫 X」的整段防污判定从来没执行过。两个键都认，优先 card_name。
+                name = (idn.get_core("card_name") or idn.get_live("card_name")
+                        or idn.get_core("self_name") or idn.get_live("self_name"))
             if name:
                 # 🔧 2026-11-06（体检修）：原来写的是
                 #    r"你(?:的名字)?(?:应该|其实)?(?:叫|是)…"
