@@ -2511,6 +2511,54 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._fail(500, "impression_read", str(e))
 
+            if method == "GET" and path == "/thoughts":
+                try:
+                    import urllib.parse as _qmod
+                    _qq = _qmod.parse_qs(_qmod.urlparse(self.path).query)
+                except Exception:
+                    _qq = {}
+                try:
+                    _n = int((_qq.get("limit") or ["10"])[0])
+                except Exception:
+                    _n = 10
+                with m.lock:
+                    _rows = m.card.thoughts(limit=_n)
+                return self._json(200, {"ok": True, "items": _rows})
+
+            if method == "GET" and path == "/viscera/history":
+                try:
+                    import urllib.parse as _qmod
+                    _qq = _qmod.parse_qs(_qmod.urlparse(self.path).query)
+                except Exception:
+                    _qq = {}
+                try:
+                    _h = float((_qq.get("hours") or ["24"])[0])
+                except Exception:
+                    _h = 24.0
+                with m.lock:
+                    _items = m.card.viscera_history(hours=_h)
+                return self._json(200, {"ok": True, "items": _items})
+
+            if method == "GET" and path == "/media/stats":
+                try:
+                    import urllib.parse as _qmod
+                    _qq = _qmod.parse_qs(_qmod.urlparse(self.path).query)
+                except Exception:
+                    _qq = {}
+                with m.lock:
+                    _st = m.card.media_stats()
+                return self._json(200, {"ok": True, "stats": _st})
+
+            if method == "GET" and path == "/identity/check":
+                try:
+                    import urllib.parse as _qmod
+                    _qq = _qmod.parse_qs(_qmod.urlparse(self.path).query)
+                except Exception:
+                    _qq = {}
+                with m.lock:
+                    _idt = m.card.identity_check()
+                return self._json(200, {"ok": True, "identity": _idt})
+
             if method == "GET" and path == "/viscera/profile":
                 try:
                     return self._send(200, {"ok": True,
@@ -4566,6 +4614,13 @@ def _start_boot_check(mind, delay=1.0):
         chk("world_tick", lambda: bool(getattr(mind, "_world_tick_on", False)
                                        or float(getattr(mind, "_world_tick_last", 0) or 0) > 0))
         chk("readonly", lambda: bool(getattr(mind, "readonly", False)))
+        def _identity():
+            # V10.8：身份锚六个字段被改（或整库替换）时，以前没有任何地方会发现。
+            _r = mind.card.identity_check()
+            if _r.get("ok") is False and _r.get("bad") and _r["bad"] != ["__unsealed__"]:
+                raise ValueError("身份锚对不上：%s" % "、".join(_r["bad"]))
+            return _r
+        chk("identity", _identity)
         def _warm_embed():
             # 第一笔写入 / 第一次召回要现加载语义模型：实测冷启动后第一笔写入排了 111 秒。
             # 自检顺手热一次，别让用户第一句「记住」等在那儿。

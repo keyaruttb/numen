@@ -1442,6 +1442,14 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         #    之前它们是独立模块，测试各自过、但卡自己并不知道它们存在，
         #    等于两块零件做完了没装上。这里共享同一个 sqlite 连接。
         self.skill = skill.SkillMemory(self.db)
+        # V10.8：卡里有 vec 为空的技能（id=4/5 的 len(vec)=2），
+        # skill.search() 对空 vec 直接 continue —— 补一次，只填空行。
+        try:
+            _nv = self.skill.ensure_vecs(to_vec)
+            if _nv:
+                print("[card2] 技能向量补齐 %d 条" % _nv)
+        except Exception as _sv:
+            soft_fail("skill_ensure_vecs", _sv)
         # 这里必须传 self.card_dir 而不是参数 card_dir：不传参时 card_dir 是
         # None，而 self.card_dir 已经退回「库文件所在目录」了。传参数会让
         # 头像/身份卡找不到落盘位置（2026-10-31 换头像时报「没有卡目录」）。
@@ -4006,6 +4014,27 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         import contemplate as _ct
         return _ct.add(self, source, title, quote, about_world, about_self,
                        tags=tags, now=now)
+
+    def identity_check(self):
+        """启动时核对六个身份锚字段（V10.8）。
+
+        为什么现在才接：identity.IdentityAnchor.verify_or_die() 早就写好了，
+        但全仓库没有一处调它 —— 也就是说 core_zone 里的锚字段被改掉，
+        除了 SQLite 触发器没人会知道，而触发器只挡 UPDATE、不挡「整库替换」。
+        这里只读比对，不修也不拒绝启动，结果进 {@link /health} 的启动自检。
+        """
+        try:
+            import identity as _idn
+            vals = {}
+            for k in _idn.CORE_KEYS:
+                v = self.identity.get_core(k)
+                if v is not None:
+                    vals[k] = v
+            ok, bad = self.identity.verify(vals)
+            return {"ok": bool(ok), "bad": list(bad or []), "n": len(vals)}
+        except Exception as _e:
+            soft_fail("identity_check", _e)
+            return {"ok": None, "bad": [], "err": "%s: %s" % (type(_e).__name__, _e)}
 
     def thought_line(self, max_chars=60):
         """最近在读/在想的一句话（来自思考层）。给我自己看，不是给他看。"""
