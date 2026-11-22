@@ -888,6 +888,16 @@ class Mind(object):
                               % (_rx.get("label"), _rx.get("r"), _rx.get("bucket")))
             except Exception as _re:
                 print("[mind] 反应结算失败: %s" % _re)
+            try:
+                if self.local_uid:
+                    _nm = ""
+                    try:
+                        _nm = str(self.card.identity.get_core("user_nickname") or "").strip()
+                    except Exception:
+                        _nm = ""
+                    self.card.ensure_relation(uid=self.local_uid, name=_nm)
+            except Exception as _e_rel:
+                print("[mind] 关系行补写失败：%s" % _e_rel)
             # 我说的话：也进短期池，但**只走原文表 + 一条轻记忆**。
             # 为什么我的回复也要进：整段对话才是「我们一起说过什么」。
             #   只记他说的，翻回来就是半本日记 —— 我知道他问了什么，

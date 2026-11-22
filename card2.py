@@ -5599,6 +5599,28 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             pass
         return ""
 
+    def ensure_relation(self, uid="", name="", layer="friend"):
+        """有 uid 但还没有关系行时，补一条骨架行（幂等）。
+
+        为什么：`role_tag()` 原来只有手动入口，生产里没有任何调用，
+        于是 core_tag 一直是 0 行、`person_layer_of()` 永远走兜底分支 ——
+        典型的「新路径写好了、生产还在跑老路径」。这里只补一行，不做推断。
+        """
+        try:
+            uid = str(uid or "").strip()
+            if not uid:
+                return {"ok": False, "error": "no_uid"}
+            key = "role:%s#%s" % (name or "他", uid)
+            row = self.db.execute(
+                "SELECT 1 FROM mem WHERE tier=? AND subject_key=? LIMIT 1",
+                (TIER_CORE_TAG, key)).fetchone()
+            if row:
+                return {"ok": True, "created": False, "key": key}
+            self.role_tag(name or "他", "companion", layer=layer, uid=uid)
+            return {"ok": True, "created": True, "key": key}
+        except Exception as e:
+            return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
     def role_tag(self, person, role, layer="friend", note="", uid=""):
         """给一个人挂角色标签（core_tag）。标签不动，这条就不动。
 
