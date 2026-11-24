@@ -156,20 +156,46 @@ class EmotionEngine:
             os.remove(self.path)
 
     def apply_wallclock_gap(self) -> None:
-        """真实时间流逝也应当让情绪冷却（不是只有对话轮次才算时间）。"""
+        """真实时间流逝也应当让情绪冷却（不是只有对话轮次才算时间）。
+
+        ⚠ 2026-11-23 更正一处我自己的误判：
+          我一开始以为「这个函数写了没人调」。**错了** —— `_load()` 最后一行就在调它
+          （`engine.py:124`，注释写着「关了几天再打开，情绪先自然回落」）。
+          所以五条调质**每次卡启动都会按真实时长回落**，只是回落后不落盘（没有 save）。
+          ⇒ 真正没人管的是 **`fatigue`**：它只在 `step()` 的 `_update_fatigue()` 里变，
+            而那个只有对话才跑。于是「没对话」时疲劳永远卡着（实测卡在 0.921、把 DA 脉冲折损到 49%）。
+          ⇒ 所以这个函数真正该补的是 fatigue，不是五调质（五调质 `_load()` 已经补过了）。
+        """
         gap = time.time() - self.last_ts
-        turns = min(gap / 90.0, 40.0)     # 90 秒 ≈ 1 轮
+        # 🔧 2026-11-23：上限从 40 轮（= 1 小时）改成 **960 轮（= 1 天）**。
+        #    卡主原话：「一次性补算合理，但超过一个小时就完全冷却是不是太快了」。
+        #    40 轮意味着「睡个午觉情绪就归零」，对 CORT（半衰期 8 轮）和 OT（16 轮）太粗暴。
+        #    改成一天之后：睡一夜该淡的都淡了，但不会「一小时前的情绪就没了」。
+        #    ⚠ 这个上限的真正作用不是「限制冷却」，是 **防时钟跳变**。
+        turns = min(gap / 90.0, 960.0)     # 90 秒 ≈ 1 轮；上限 = 一天
         if turns > 0.2:
             self.decay(turns)
+            # 疲劳也按真实时间恢复。条件跟 `_update_fatigue` 一致：
+            # 只有 CORT 回落到阈值以下才算「缓过来了」（decay 已经先把它降下来了）。
+            f = self.cfg["fatigue"]
+            if self.st["CORT"] < f["cort_threshold"]:
+                self.fatigue = clip(self.fatigue
+                                    - f["recover"] * turns * (1.0 - 0.3 * self.st["OT"]))
 
     # ------------------------------------------------------------- ① 安全评估
     def _update_safety(self, ap: Appraisal) -> None:
         s = self.cfg["safety"]
         threat = max(ap.threat, ap.boundary) * (1.0 - 0.75 * ap.repair)
-        target = clip(0.45 * self.st["OT"] + 0.45 * (1.0 - threat) + 0.10 * (1.0 - ap.cold)
+        raw_target = (0.45 * self.st["OT"] + 0.45 * (1.0 - threat) + 0.10 * (1.0 - ap.cold)
                       + 0.30 * ap.repair)  # 道歉/安抚能把安全感真正拉回来
         if ap.empathy_pain > 0.3:      # 共情场景：我在意你，安全反而升高
-            target = clip(target + 0.10)
+            raw_target = raw_target + 0.10
+        # 🔧 2026-11-23：加软底（goal 第②条）。
+        #    原来 target 会被 threat=1.0 + OT≈0 压到 0.07，safety 8 轮就从 0.85 塌到 0.29。
+        #    而 gate_lo=0.55 —— 0.29 和 0.35 对 gate 是同一件事（都关死）。
+        #    ⇒ 再往下没有信息量，只让「恢复」多花几轮。软底 0.35 的语义是
+        #      「再糟也不会比这更没安全感」，不是「不许没安全感」。
+        target = clip(max(0.35, raw_target))
         rate = s["down_rate"] if target < self.safety else s["up_rate"]
         self.safety += (target - self.safety) * rate
         self.safety = clip(self.safety)
@@ -292,8 +318,25 @@ class EmotionEngine:
         # 正向时相与 5HT 的拮抗：5HT 高会压住 NE 的冲动
         d["NE"] *= (1.0 - 0.35 * clip(self.st["5HT"] - 0.4))
 
+        # 🔧 2026-11-23：注入改成**饱和式**（goal 第②条）。
+        #    原来是 `st[k] = clip(st[k] + d[k])` —— 线性叠加，没有「离端点还有多远」这一项。
+        #    于是极端但常见的输入会一路打到底：实测（12 句安抚 / 8 句重话 / 6 句亲密）
+        #        A 安抚：OT 贴顶 92%、5HT 贴底 58%、CORT 贴底 100%
+        #        B 重话：DA 贴底 100%、NE 贴顶 100%、OT 贴底 88%、5HT 贴顶 88%、CORT 贴顶 100%
+        #        C 亲密：DA 贴顶 100%、NE 贴顶 83%、OT 贴顶 67% → 主导卡在 shy
+        #    端点一到就丢分辨率，而且 safety 跟着 OT 一起塌到底。
+        #
+        #    第一版写成 `st += d*(1-st)`（goal 原文的公式），把 5HT/OT/NE 都救回来了，
+        #    但 **CORT 还是一轮打满** —— 因为单句 threat 的 d 本身就有 1.05
+        #    （0.62×neg + 0.55×threat），`1.05×(1−0.22)=0.82` 一样冲出 1.0。
+        #    ⇒ 换成 `(1−st)·(1−e^{−|d|})`：**小 d 时接近线性，大 d 时渐近端点**，
+        #      d 再大也不会一轮打满。数学上这是唯一能保证「有界」的形状。
         for k in MODS:
-            self.st[k] = clip(self.st[k] + d[k])
+            dv = d[k]
+            if dv > 0:
+                self.st[k] = clip(self.st[k] + (1.0 - self.st[k]) * (1.0 - math.exp(-dv)))
+            elif dv < 0:
+                self.st[k] = clip(self.st[k] - self.st[k] * (1.0 - math.exp(dv)))
         # 促性腺激素式"克制"：极强 NE + 高压 CORT 时不产生暧昧，直接进回避
         if ap.boundary > 0.5 or ap.threat > 0.7:
             self.st["DA"] = clip(self.st["DA"] - 0.20)
@@ -310,7 +353,7 @@ class EmotionEngine:
         self.rep = {k: v for k, v in self.rep.items() if v > 0.05}
 
         self._drift(ap, rpe, v_actual)
-        self._update_fatigue(dt)
+        self._update_fatigue(dt, ap)
         self._update_endogenous()
 
         # 情绪分类
@@ -367,13 +410,37 @@ class EmotionEngine:
         self.base["OT"] = clip(self.base["OT"], lo, hi)
         self.base["CORT"] = clip(self.base["CORT"], lo, hi)
 
-    def _update_fatigue(self, dt: float) -> None:
+    def _update_fatigue(self, dt: float, ap: Optional[Appraisal] = None) -> None:
         f = self.cfg["fatigue"]
         over = self.st["CORT"] - f["cort_threshold"]
         if over > 0:
-            self.fatigue += f["accumulate"] * (over * 2.0 + 0.2) * dt
+            # 🔧 2026-11-23：去掉原来那个 `+ 0.2` 常数项。
+            #    原来写的是 `accumulate * (over*2 + 0.2)` —— 常数项的意思是
+            #    「只要 CORT 高过阈值一丁点，每轮就按 0.2 的底速累积疲劳」。
+            #    实测（200 条真实对话跑下来）CORT 常年 0.40 左右、阈值 0.38，
+            #    over ≈ +0.02 ⇒ 每轮 +0.055×0.24 = +0.0132，200 轮就顶满 1.0。
+            #    而 fatigue=1.0 会让主导情绪变成「抽离麻木」（numb 占 42.5%），
+            #    同时把 DA 脉冲折损到 45% —— 那才是「怎么都没反应」的主因，
+            #    比 adapt（适应）的影响大得多（三档 adapt_strength 对比：DA p50 只从 0.366 到 0.413）。
+            #    去掉常数项后，累积速率 ∝ 超出阈值的程度：略高于阈值 ≈ 不累积，
+            #    CORT 真的飙起来（0.6+）仍然快速累积。这才是「耗竭」该有的形状。
+            self.fatigue += f["accumulate"] * (over * 2.0) * dt
         else:
             self.fatigue -= f["recover"] * dt * (1.0 - 0.3 * self.st["OT"])
+        # 🔧 2026-11-23：加一条「被安抚就缓过来」的通路。
+        #    原来的恢复只有一个入口：`CORT < cort_threshold(0.38)`。
+        #    而实测（qq_state\emotion\xiyin.json）CORT=0.407 长期压在阈值上方 0.027，
+        #    于是 fatigue 卡在 0.921 —— 只涨不落，而疲劳会把 DA 脉冲折损到 49%
+        #    （fat_f = 1 - 0.55*0.921），日常对话于是「怎么都没反应」。
+        #    语义上：疲劳是「应激耗竭」，**有人哄、被关心本来就该缓解它**，
+        #    不该只看 CORT 这一个数。所以把 repair（道歉/安抚）和 care（关心）也接进来。
+        #    两边可以同时发生：一边还绷着（CORT 高在涨），一边被哄（这里在降）—— 那是对的。
+        #    系数用 cfg 里的 fatigue.relief，没配就 0.055（约等于 accumulate 的量级）。
+        if ap is not None:
+            relief = 0.75 * float(getattr(ap, "repair", 0.0) or 0.0) \
+                   + 0.45 * float(getattr(ap, "care", 0.0) or 0.0)
+            if relief > 0:
+                self.fatigue -= float(f.get("relief", 0.055)) * relief * dt
         self.fatigue = clip(self.fatigue)
 
     def _update_endogenous(self) -> None:

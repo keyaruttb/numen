@@ -1,70 +1,83 @@
-# 閼奉亜鐣炬稊澶婂幢閻ㄥ嫭鏆熼幑顔肩氨閿涘牐绻栭弰顖炴缁変焦婀伴煬顐礉缂佹繀绗夐懗鍊熺箻娴犳挸绨遍敍?card.db
+# ===========================================================================
+# 数灵生命卡 · .gitignore
+# 2026-11-24 重写。原来那份有几条规则失效了（实测 models/ 和 qq_state/ 没被忽略，
+# 而 models/ 是 390MB 的向量模型、qq_state/ 里放着 8848 的访问令牌）。
+# 写这份时逐条用 git check-ignore 验过。
+# ===========================================================================
+
+# ---------- 卡数据：绝不入库 ----------
+card.db
 card.db-*
 *.db
 *.db-wal
 *.db-shm
 *.db.bak*
+*.bad-*
 *.broken-*
+card.db.bad-*
 
-# 閸氭垿鍣哄Ο鈥崇€烽敍鍫濆殤閻?MB閿涘矁鍤滃鍙樼瑓閿?models/
-
-# 鏉╂劘顢戦幀浣烽獓閻?anchor.json
+# ---------- 本地状态与密钥：绝不入库 ----------
+identity.json
+identity.json.*
+anchor.json
+anchor.key
 anchor.*.json
-__pycache__/
-*.pyc
-snapshots/
+anchor.*.key
+WRITER-LEASE.json
+device.json
+deploy-report.json
+deploy-report.md
+qq_state/
+dsh_channel_rule.txt
+avatar.png
+
+# ---------- 所有备份文件（.bak / .bak-时间戳 / .bak-用途）----------
+*.bak
+*.bak-*
+*.bak.*
+dsh-plugin.bak-*/
+
+# ---------- 模型（390MB，按需下载）----------
+models/
+*.safetensors
+*.bin.part.*
+
+# ---------- 备份与快照 ----------
 backups/
+snapshots/
+checkpoints/
 diary/
 viz/
 demo/*.db
 demo/*.db-*
-dsh_channel_rule.txt
-avatar.png
+logs-*/
+_backup-*/
+
+# ---------- Python ----------
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# ---------- 一次性探针与临时产物 ----------
+# 这些是排查问题时临时写的，不属于项目代码。
+# 真要保留某一个：git add -f <文件名>
+_*.py
+_*.mjs
+_*.js
+_*.json
+_*.jsonl
+_*.txt
+_*.md
+_*.lock
 _*.log
+_probe_out*
+_verify_out*
 *.log
+*_old_probe.py
+_split-*/
 
-# 閹搭亜娴橀柌灞界埗閺堝婀＄€圭偞鏆熼幑?docs_*.png
-_cs*.png
-
-# 閺堫剙婀撮悳顖氼暔
-.venv/
-venv/
-.env
-
-# 濞村鐦悾娆庣瑓閻ㄥ嫪澶嶉弮鍓佹窗瑜版洩绱欓張澶夌昂濞村鐦悽?mkdtemp(dir=ROOT)閿涘矁绐囩€瑰奔绗夊〒鍛倞閿?t[0-9]*_*/
-qqg[0-9]*_*/
-qqguard_*/
-replica_*/
-_t7*_*/
-
-# 閸欐垵绔烽懘姘拱閻ㄥ嫭鐖ｇ拋鐗堟瀮娴?.builder_meta
-
-# 鏉╂劘顢戦幀浣烽獓閻椻晪绱橵7 鐞涖儵缍堥敍?cache/
-checkpoints/
-device.json
-disks/
-_trash/
-dev/
-probe/
-
-
-# 閻喎鐤勯懕濠傘亯鐠囶厽鏋?娴滃瞼娣惍渚婄礄閸氼偆鍏㈤崣鏋偓涔絠d閵嗕胶娅ヨぐ鏇犵垳閿涘瞼绮锋稉宥堢箻閸忣剙绱戞禒鎿勭礆
-qq-corpus*.jsonl
-qq-notes.md
-qq-login-qr*.png
-habits-*-qq.*
-
-# 杩愯鏈熺‖渚濊禆锛歴tructure.py 瑕佷粠杩欎釜 pyc 閲屽姞杞藉師琛ㄤ笌鍒囧彞锛堜笉鑳藉拷鐣ワ級
-!_structure_orig.pyc
-
-# 本地备份 / 锚文件 / 构建元数据 / 验收报告（不入库）
-*.bak-*
-*.bak-*.py
-anchor*.json
-.builder_meta
-deploy-report.json
-deploy-report.md
-STOPPED.json
-migrations/
-anchor*.key
-*.key
+# ---------- 三个自研插件：要入库，放行 ----------
+!dsh-autoreport/
+!dsh-shuling-breath/
+!dsh-thinking-guard/

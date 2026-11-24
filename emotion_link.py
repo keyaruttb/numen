@@ -210,6 +210,15 @@ class EmotionLink:
         if not self.eng:
             return None
         try:
+            # 🔧 2026-11-23（第五件：「无对话不衰减」）：
+            #    这一行是补上「真实时间流逝」的唯一入口。
+            #    原来 `eng.step(ap)` 的 dt 用默认 1.0 —— 隔三天再说话也只衰减 1 轮，
+            #    于是状态文件停在上次说话那一刻（实测停在 11-22 15:37、turn=147、fatigue=0.921）。
+            #    `engine.py` 里那个 `apply_wallclock_gap()` 本来就是为这件事写的，写了却没人调。
+            #    ⇒ 在这里补一次「一次性补算」：按距上次的真实时长算出该衰减多少轮，一把补完。
+            #    ⚠ 不要在这里 save()：`eng.step()` 末尾会 save，那时才会更新 last_ts。
+            #      如果这里先 save，会把「补算后的状态」按「旧 last_ts」落盘，下一轮又补一次。
+            self.eng.apply_wallclock_gap()
             sc = scenario or guess_scenario(text)
             ap = estimate_appraisal(text or "", scenario=sc)
             return self.eng.step(ap)

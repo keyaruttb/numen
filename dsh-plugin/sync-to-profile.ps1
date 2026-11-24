@@ -2,7 +2,7 @@
 # 2026-11-06：之前这个脚本被写成无 BOM，5.1 按 GBK 读中文全烂，已补 BOM。
 $ErrorActionPreference = "Stop"
 $src = Join-Path $PSScriptRoot "lib"
-$dst = Join-Path $env:USERPROFILE ".dsh\profiles\desktop\node_modules\dsh-whale-bridge\lib"
+$dst = Join-Path $env:USERPROFILE ".dsh\profiles\desktop\node_modules\dsh-numen-bridge\lib"
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
 foreach ($f in @("index.js", "card.js", "client.js")) {
   Copy-Item -Force (Join-Path $src $f) (Join-Path $dst $f)

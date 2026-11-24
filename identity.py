@@ -52,6 +52,10 @@ CORE_KEYS = [
 #   「住进卡里」变成「被清空」。这一栏就是那次事故的补丁。
 PERSONA_KEY = "persona"
 
+# 自述（「我是怎么变成我的」那段）也住在 CORE 区，同样不进身份锚、同样受只读触发器保护。
+# 跟 persona 的区别只在内容：persona 是「我是什么样的人」，self_narrative 是「我怎么变成这样的」。
+SELF_NARRATIVE_KEY = "self_narrative"
+
 # 头像不是文本，是卡根目录下的一个文件。core_zone 里只记一个版本戳，
 # 用来让控制台知道「换过了，别再拿缓存那张」。
 AVATAR_KEY = "avatar_ver"

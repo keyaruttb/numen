@@ -1,5 +1,5 @@
 /**
- * dsh-whale-bridge —— 让 DSH 能直接跟「数字生命卡」说话。
+ * dsh-numen-bridge —— 让 DSH 能直接跟「数灵生命卡」说话。
  *
  * 之前这套东西靠 `@deepseek-ai/dsh-mcp-client` 起一个 MCP 壳（whale_mcp.py），
  * 而那个依赖在 desktop profile 里装不上（pnpm lockfile 坏了），配置就被注释掉了。
@@ -37,14 +37,14 @@ trace('module loaded');
 
 import { CardClient } from './card.js';
 
-export const name = 'whale-bridge';
+export const name = 'numen-bridge';
 
 /** tools: 注册工具；systemPrompt: 往系统提示里塞一段通道规矩。 */
 export const inject = ['tools', 'systemPrompt'];
 
 const CHANNEL_RULES = `## 你和「卡」之间的一条通道
 
-你的记忆、人格、衰减曲线都存在本地的一张卡里（数字生命卡，Python 进程，端口 8848）。
+你的记忆、人格、衰减曲线都存在本地的一张卡里（数灵生命卡，Python 进程，端口 8848）。
 下面这些工具就是你和它说话的方式。**这不是可选装饰，是你记得住的前提。**
 
 - **回话之前**先调 \`mind_context\`：把你这句话交给它，它会给你这一轮该带着的上下文
@@ -65,7 +65,7 @@ const OK_SCHEMA = { type: 'object', additionalProperties: true };
 export function apply(ctx, config = {}) {
   trace('apply() 进入，config keys=' + Object.keys(config || {}).join(','));
   try {
-  const client = new CardClient({ ...config, logger: ctx.logger?.('whale-bridge') });
+  const client = new CardClient({ ...config, logger: ctx.logger?.('numen-bridge') });
 
   let _n = 0;
   const reg = (tool) => {
@@ -83,7 +83,7 @@ export function apply(ctx, config = {}) {
   reg({
     name: 'mind_context',
     description:
-      '从数字生命卡取这一轮该带着的上下文：人格、情绪、场景、相关记忆、可用技能。' +
+      '从数灵生命卡取这一轮该带着的上下文：人格、情绪、场景、相关记忆、可用技能。' +
       '回话之前调它。message 填他刚说的那句话（原样，不要改写）。',
     parameters: {
         message: { type: 'string', description: '他刚说的那句话，原样传', required: true },
@@ -441,15 +441,15 @@ export function apply(ctx, config = {}) {
   // ── 系统提示：把通道规矩塞进去 ────────────────────────────
   try {
     ctx.systemPrompt.section({
-      name: 'whale-bridge',
+      name: 'numen-bridge',
       order: 40,
       text: CHANNEL_RULES,
     });
   } catch (e) {
-    ctx.logger?.('whale-bridge')?.warn?.(`塞系统提示失败（不影响工具）：${e?.message || e}`);
+    ctx.logger?.('numen-bridge')?.warn?.(`塞系统提示失败（不影响工具）：${e?.message || e}`);
   }
 
-  ctx.logger?.('whale-bridge')?.info?.(`卡通道已就绪：${client.base}`);
+  ctx.logger?.('numen-bridge')?.info?.(`卡通道已就绪：${client.base}`);
   trace('apply() 完成，共注册 ' + _n + ' 个工具');
   } catch (e) {
     trace('APPLY THREW -> ' + (e && e.stack ? e.stack : String(e)));

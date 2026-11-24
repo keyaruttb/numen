@@ -41,7 +41,7 @@ function chk(title, ok, extra = '') {
 
 console.log('== 1. 模块能不能加载 ==');
 const mod = await import('../lib/index.js');
-chk('导出 name', mod.name === 'whale-bridge', mod.name);
+chk('导出 name', mod.name === 'numen-bridge', mod.name);
 chk('导出 inject 含 tools', Array.isArray(mod.inject) && mod.inject.includes('tools'));
 chk('导出 apply 是函数', typeof mod.apply === 'function');
 chk('default 也有 apply', typeof mod.default?.apply === 'function');

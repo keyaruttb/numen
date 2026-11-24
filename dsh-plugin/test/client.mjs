@@ -62,7 +62,7 @@ console.log("=== 1. 打包格式 ===");
 const specs = loadBundle();
 chk("调用了 window.__ModuleLoader__.load", specs.length === 1, "次数=" + specs.length);
 const spec = specs[0] || {};
-chk("spec.id 是本插件", spec.id === "dsh-whale-bridge", "id=" + spec.id);
+chk("spec.id 是本插件", spec.id === "dsh-numen-bridge", "id=" + spec.id);
 chk("spec.factory 是函数", typeof spec.factory === "function");
 
 console.log("=== 2. 工厂返回值契约 ===");
@@ -126,11 +126,11 @@ function makeCtx(behavior = {}) {
 	exportsObj.apply(ctx);
 	chk("ctx.inject 请求的是 sidebarRightTabs", JSON.stringify(got.injectServices) === '["sidebarRightTabs"]', JSON.stringify(got.injectServices));
 	chk("页签注册了", !!got.tab);
-	chk("页签 id 正确", got.tab && got.tab.id === "dsh-whale-bridge/console", got.tab && got.tab.id);
-	chk("页签 kind 正确", got.tab && got.tab.kind === "dsh-whale-bridge-console", got.tab && got.tab.kind);
+	chk("页签 id 正确", got.tab && got.tab.id === "dsh-numen-bridge/console", got.tab && got.tab.id);
+	chk("页签 kind 正确", got.tab && got.tab.kind === "dsh-numen-bridge-console", got.tab && got.tab.kind);
 	chk("页签标题取得到字", got.tab && typeof got.tab.title === "function" && got.tab.title() === "控制台", got.tab && String(got.tab.title && got.tab.title()));
 	chk("slot 注册到了 sidebar.right.pane.tab", got.slotServiceName === "sidebar.right.pane.tab", got.slotServiceName);
-	chk("slot.key 等于页签 id", got.slot && got.slot.spec.key === "dsh-whale-bridge/console", got.slot && got.slot.spec.key);
+	chk("slot.key 等于页签 id", got.slot && got.slot.spec.key === "dsh-numen-bridge/console", got.slot && got.slot.spec.key);
 	chk("slot 挂的是 ConsolePane", got.slot && got.slot.comp === exportsObj.ConsolePane);
 	chk("effect 被用来管理生命周期", got.effectRuns === 1, "runs=" + got.effectRuns);
 }

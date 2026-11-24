@@ -1,6 +1,6 @@
-# dsh-whale-bridge
+# dsh-numen-bridge
 
-把本地「数字生命卡」接进 DSH 的一层薄桥。**只做一件事：让模型能直接调用卡。**
+把本地「数灵生命卡」接进 DSH 的一层薄桥。**只做一件事：让模型能直接调用卡。**
 
 ## 为什么有这个
 
@@ -45,12 +45,12 @@ node test/plugin.mjs            # 插件层：假 ctx 里装一遍，看工具�
 ## 装上
 
 ```bat
-mklink /J "%USERPROFILE%\.dsh\profiles\desktop\node_modules\dsh-whale-bridge" "workspace\deploy\dsh-whale-bridge"
+mklink /J "%USERPROFILE%\.dsh\profiles\desktop\node_modules\dsh-numen-bridge" "workspace\deploy\dsh-numen-bridge"
 python install-to-profile.py
 ```
 
 `install-to-profile.py` 会往 `~\.dsh\profiles\desktop\cordis.patch.yml` 追加一条
-`- id: whale-bridge` 的 patch 项，并**当场用 pyyaml 解析一遍**确认没把 YAML 写坏。
+`- id: numen-bridge` 的 patch 项，并**当场用 pyyaml 解析一遍**确认没把 YAML 写坏。
 
 **装完必须重启 DSH 才生效**（插件在启动时加载）。
 

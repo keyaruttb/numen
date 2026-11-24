@@ -213,12 +213,28 @@ class MixStore:
         #    召回时还可能两条一起被捞出来占两个名额。
         #    精确全等查一次（七百来行的表扫一遍是亚毫秒），命中就走同一条「续命」路径。
         _exact_id = None
-        if region != R_FLASH and _trust >= TRUST_WARN and not _conflict:
+        # 🔧 2026-11-23（重复召回修复 · 第 3 处 · 真正的入口）：逐字相同的句子，
+        #    flash 区也参与合并。改前是 `if region != R_FLASH` —— 闪光灯区被整段
+        #    排除在「完全相同的句子」查重之外，于是一句原话被重复写进来 6 次
+        #    都算 6 条新记忆。真卡证据：id 1732/1737/1744/1747/1748/1750，
+        #    raw 逐字相同、create_ts 全等于 1795360335.282、region 全 flash、
+        #    source 全 autoreport，6 条的 pool_in_ts 跨度 8.01 小时 —— 一个事件被
+        #    写了 6 遍。另一组 id 1730/1738/1745/1746/1749/1751 同样 6 遍。
+        #    只放开「逐字相同」（raw 全等，无歧义），**不动**下面的 jaccard 分支：
+        #    flash 仍然不参与"相似即合并"，那条 0.92 的口径保持原样。
+        #    合并方向也收紧：flash 只跟 flash 比，非 flash 只跟非 flash 比（跟改前一致），
+        #    免得一条普通记忆被并进一条闪光灯记忆的壳里。
+        #    怎么回退：把 if 恢复成 `if region != R_FLASH and _trust >= TRUST_WARN and not _conflict:`，
+        #    把 SQL 恢复成 "SELECT id FROM mem WHERE raw=? AND region!=? ORDER BY id DESC LIMIT 1"
+        #    并传 (text, R_FLASH)；或整文件覆盖回 cardmix_store.py.bak-20261123-215515-before-flashexact。
+        if _trust >= TRUST_WARN and not _conflict:
             try:
+                _same = "region=?" if region == R_FLASH else "region!=?"
+                _same_arg = region if region == R_FLASH else R_FLASH
                 _er = self.db.execute(
-                    "SELECT id FROM mem WHERE raw=? AND region!=?"
+                    "SELECT id FROM mem WHERE raw=? AND " + _same +
                     " ORDER BY id DESC LIMIT 1",
-                    (text, R_FLASH)).fetchone()
+                    (text, _same_arg)).fetchone()
                 if _er is not None:
                     _exact_id = _er[0]
             except Exception:
@@ -474,13 +490,30 @@ class MixStore:
         # 但对话原文一条都没落盘」，从 10 月底一直静默到现在。
         src = (source or "session")
         cur = self.db.cursor()
+        # 2026-11-22 去重：同一句话 + 同一个说话角色 + 时间差 ≤2 秒 ⇒ 认为是同一次写入。
+        # 为什么需要它：自动上报（插件在 turn/end 时调 /report）可能因为换会话、
+        #   进程重启把同一轮重报一次。mem 那一层有 _is_dup 近义去重挡着，
+        #   但 dialogue 这一层原来直接 INSERT，什么都没有。
+        # 为什么窗口取 2 秒：正常对话里同一句话在 2 秒内说两遍几乎不可能
+        #   （"继续"这类会连续出现的短句，间隔也在分钟级）。
+        # 命中就返回 None —— 调用方（report）不看这个返回值，只看有没有抛异常。
+        _dup = cur.execute(
+            "SELECT id FROM dialogue WHERE role='user' AND text=? AND ts BETWEEN ? AND ? LIMIT 1",
+            (str(user_text), t - 2.0, t + 2.0)).fetchone()
+        if _dup:
+            return None
         cur.execute(
             "INSERT INTO dialogue(mem_id,ts,role,text,source) VALUES(?,?,?,?,?)",
-            (int(mem_id), t, "user", str(user_text), src))
+            # 2026-11-22：mem_id 可能是 None（入门筛拦住，remember() 返回 False，
+            #   /report 把它转成 None）。int(None) 会抛 TypeError，被 report() 的
+            #   try/except 吞掉 —— 结果是「这一轮的 user + assistant 两行一起丢」。
+            #   0 是 dialogue.mem_id 的既定语义（没关联到记忆）：库里被提炼过的
+            #   对话 mem_id 全是 0。所以 None → 0，原话照写，记忆该不该写仍归入门筛管。
+            (int(mem_id or 0), t, "user", str(user_text), src))
         if reply_text:
             cur.execute(
                 "INSERT INTO dialogue(mem_id,ts,role,text,source) VALUES(?,?,?,?,?)",
-                (int(mem_id), t + 1, "assistant", str(reply_text), src))
+                (int(mem_id or 0), t + 1, "assistant", str(reply_text), src))
         self.db.commit()
         return cur.lastrowid
 

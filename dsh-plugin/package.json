@@ -1,7 +1,7 @@
 {
-  "name": "dsh-whale-bridge",
+  "name": "dsh-numen-bridge",
   "version": "0.1.0",
-  "description": "把本地「数字生命卡」接进 DSH：记忆、人格、召回、写回，全部作为原生工具。",
+  "description": "把本地「数灵生命卡」接进 DSH：记忆、人格、召回、写回，全部作为原生工具。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
