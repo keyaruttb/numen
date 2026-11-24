@@ -79,6 +79,14 @@ OVERRIDE_DECAY = 0.6
 FADE_HALF_DAYS = 90.0
 W_DEAD = 0.06
 
+# ---- 两种强度（2026-11-20） ----------------------------------------------
+# direct   = 对话里当场判定的（他真说了这句）  → 全权
+# indirect = 联想/回想时推出来的（从别的记忆里闻到的味道）→ 打折
+# 两种分开长次数：间接的见闻不能把直接的证据摊薄，反之也不该被算成一样硬。
+VIA_DIRECT = "direct"
+VIA_INDIRECT = "indirect"
+INDIRECT_SCALE = 0.45
+
 # ---- 其它 ----------------------------------------------------------------
 MAX_PER_SUBJECT = 40       # 每个主体最多留 40 条，超出淘汰权重最低的
 REACTION_MAX_CHARS = 60
@@ -193,6 +201,15 @@ def weight_of(n):
     return min(0.98, 1.0 - 0.5 ** (float(n) / W_SCALE))
 
 
+def scale_of(via):
+    """直接判定全权，联想中间接判定打折（0.45）。"""
+    return INDIRECT_SCALE if str(via or "").lower() == VIA_INDIRECT else 1.0
+
+
+def weight_for(n, via=VIA_DIRECT):
+    return weight_of(n) * scale_of(via)
+
+
 def override_need(n_old):
     """要覆盖这条印象，需要多少次反向证据（要比它被看到的次数更多）"""
     return max(OVERRIDE_MIN, int(math.ceil(float(n_old) * OVERWRITE_FACTOR)))
@@ -221,7 +238,8 @@ CREATE TABLE IF NOT EXISTS impression (
     scene_event TEXT NOT NULL DEFAULT '',    -- 回来/吃饭/考试…
     scene_mood TEXT NOT NULL DEFAULT '',     -- 好/一般/差（我的状态）
     reaction TEXT NOT NULL DEFAULT '',       -- 归一化后的反应
-    react_key TEXT NOT NULL DEFAULT '',      -- 行为类（arrive/meal/…）；'' = 靠字面相似度
+    react_key TEXT NOT NULL DEFAULT '',
+    via TEXT NOT NULL DEFAULT 'direct',      -- direct=对话直接判定 / indirect=联想间接判定
     sample TEXT NOT NULL DEFAULT '',         -- 第一次那句话说白了是什么（人类可读）
     n INTEGER NOT NULL DEFAULT 0,            -- 被触发次数
     alt_n INTEGER NOT NULL DEFAULT 0,        -- 在另一条反应上的反向证据累计
@@ -246,6 +264,9 @@ def ensure(conn):
         cols = {r[1] for r in conn.execute("PRAGMA table_info(impression)")}
         if "react_key" not in cols:
             conn.execute("ALTER TABLE impression ADD COLUMN react_key TEXT NOT NULL DEFAULT ''")
+        if "via" not in cols:
+            # 老行都是对话里记的，默认 direct 是对的
+            conn.execute("ALTER TABLE impression ADD COLUMN via TEXT NOT NULL DEFAULT 'direct'")
     except Exception:
         pass
     conn.commit()
@@ -260,7 +281,7 @@ def _row_key(subject, sb, reaction):
 
 
 def observe(conn, subject, text, ts=None, subject_kind="person",
-            scene_mood=None, now=None):
+            scene_mood=None, now=None, via=VIA_DIRECT):
     """观察到一次「主体在某个情境下的反应」
 
     返回 dict：{hit: 'new'|'again', need: 覆盖还差几次, replaced: 被替换的 id 或 None}
@@ -268,6 +289,7 @@ def observe(conn, subject, text, ts=None, subject_kind="person",
     这一步只记账，不做判断 —— 记录本身不该被"值不值得"污染。
     """
     ensure(conn)
+    via = VIA_INDIRECT if str(via or "").lower() == VIA_INDIRECT else VIA_DIRECT
     ts = float(ts if ts is not None else (now if now is not None else time.time()))
     react = normalize(text)
     if not react or len(react) > REACTION_MAX_CHARS:
@@ -287,14 +309,14 @@ def observe(conn, subject, text, ts=None, subject_kind="person",
         cur.execute(
             "SELECT id, n, alt_n, w, status, reaction, react_key, scene_event"
             " FROM impression"
-            " WHERE subject=? AND scene_mood=?",
-            (subject or "", sb[2]))
+            " WHERE subject=? AND scene_mood=? AND via=?",
+            (subject or "", sb[2], via))
     else:
         cur.execute(
             "SELECT id, n, alt_n, w, status, reaction, react_key, scene_event"
             " FROM impression"
-            " WHERE subject=? AND scene_time=? AND scene_event=? AND scene_mood=?",
-            (subject or "", sb[0], sb[1], sb[2]))
+            " WHERE subject=? AND scene_time=? AND scene_event=? AND scene_mood=? AND via=?",
+            (subject or "", sb[0], sb[1], sb[2], via))
     row = None
     for _cand in cur.fetchall():
         _k = _cand[6] or ""
@@ -321,7 +343,7 @@ def observe(conn, subject, text, ts=None, subject_kind="person",
             " react_key=CASE WHEN ?<>'' THEN ? ELSE react_key END,"
             " scene_event=CASE WHEN scene_event='' THEN ? ELSE scene_event END"
             " WHERE id=?",
-            (n, weight_of(n), ts, ts, status_of(n), str(text or "")[:120],
+            (n, weight_for(n, via), ts, ts, status_of(n), str(text or "")[:120],
              cls, react, cls, cls, sb[1], iid))
         if cls:
             # 合并了就把时段刷成最近一次，让人看的时候不会以为是"只有早上才这样"
@@ -339,10 +361,11 @@ def observe(conn, subject, text, ts=None, subject_kind="person",
 
     cur.execute(
         "INSERT INTO impression(subject, subject_kind, scene_time, scene_event, scene_mood,"
-        " reaction, react_key, sample, n, w, first_ts, last_ts, last_decay_ts, status)"
-        " VALUES(?,?,?,?,?,?,?,?,1,?,?,?,?,?)",
+        " reaction, react_key, sample, n, w, first_ts, last_ts, last_decay_ts, status, via)"
+        " VALUES(?,?,?,?,?,?,?,?,1,?,?,?,?,?,?)",
         (subject or "", subject_kind or "person", sb[0], sb[1], sb[2],
-         react, cls, str(text or "")[:120], weight_of(1), ts, ts, ts, STATUS_CANDIDATE))
+         react, cls, str(text or "")[:120], weight_for(1, via), ts, ts, ts,
+         STATUS_CANDIDATE, via))
     new_id = cur.lastrowid
     replaced = _challenge(conn, subject, sb, react, 1, new_id)
     if replaced is not None:
@@ -461,7 +484,7 @@ def top(conn, subject=None, limit=8, min_w=0.0):
     ensure(conn)
     cur = conn.cursor()
     q = ("SELECT id, subject, subject_kind, scene_time, scene_event, scene_mood,"
-         " reaction, sample, n, w, status, first_ts, last_ts, alt_n"
+         " reaction, sample, n, w, status, first_ts, last_ts, alt_n, via"
          " FROM impression WHERE status != ? AND w >= ?")
     args = [STATUS_SUPERSEDED, float(min_w)]
     if subject is not None:
@@ -471,7 +494,7 @@ def top(conn, subject=None, limit=8, min_w=0.0):
     args.append(int(limit))
     cur.execute(q, args)
     cols = ("id", "subject", "subject_kind", "scene_time", "scene_event", "scene_mood",
-            "reaction", "sample", "n", "w", "status", "first_ts", "last_ts", "alt_n")
+            "reaction", "sample", "n", "w", "status", "first_ts", "last_ts", "alt_n", "via")
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
@@ -501,7 +524,11 @@ def hint_lines(conn, subject=None, limit=3, min_w=None):
         sample = _tidy((it["sample"] or it["reaction"]))
         if len(sample) > 24:
             sample = sample[:24] + "…"
-        out.append("%s，他常说「%s」（%d 次）" % (scene, sample, it["n"]))
+        _via = (it.get("via") or VIA_DIRECT)
+        if _via == VIA_INDIRECT:
+            out.append("%s，隐约觉得他会说「%s」（联想 %d 次）" % (scene, sample, it["n"]))
+        else:
+            out.append("%s，他常说「%s」（%d 次）" % (scene, sample, it["n"]))
         used.add(it["id"])
     if len(out) < limit:
         # 用 weight_of(2) 当门槛会漏：n=2 的行本身还会随时间淡一点（实测 .188~.203
@@ -517,7 +544,11 @@ def hint_lines(conn, subject=None, limit=3, min_w=None):
             sample = _tidy((it["sample"] or it["reaction"]))
             if len(sample) > 24:
                 sample = sample[:24] + "…"
-            out.append("%s，他好像老说「%s」（%d 次）" % (scene, sample, it["n"]))
+            _via2 = (it.get("via") or VIA_DIRECT)
+            if _via2 == VIA_INDIRECT:
+                out.append("%s，隐约觉得他会说「%s」（联想 %d 次）" % (scene, sample, it["n"]))
+            else:
+                out.append("%s，他好像老说「%s」（%d 次）" % (scene, sample, it["n"]))
             used.add(it["id"])
     return out
 

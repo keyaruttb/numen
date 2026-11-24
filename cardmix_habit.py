@@ -27,7 +27,26 @@ import impression as impression_mod
 import facts as facts_mod
 import math
 import os
+import io
 import re
+import time
+
+
+_RELAY_PREFIX = None
+
+
+def _strip_relay_prefix(text):
+    """剥「[私聊] 昵称：」/「[群聊] 昵称：」前缀（只剥开头那一层）。"""
+    global _RELAY_PREFIX
+    if not text:
+        return text
+    try:
+        if _RELAY_PREFIX is None:
+            import re as _re
+            _RELAY_PREFIX = _re.compile(r"^\[[^\]]{1,8}\]\s*[^：:\n]{0,24}[：:]\s*")
+        return _RELAY_PREFIX.sub("", str(text))
+    except Exception:
+        return text
 
 
 class MixHabit(object):
@@ -39,11 +58,260 @@ class MixHabit(object):
     def impression_hints(self, subject=None, limit=3, min_w=None):
         return impression_mod.hint_lines(self.db, subject=subject, limit=limit, min_w=min_w)
 
+    def impression_hints_for(self, query="", subject=None, limit=3, min_w=None, pool=12):
+        """按「这句话」挑印象（2026-11-20）。
+
+        原来的读法是固定取权重最高的三条 —— 于是不管问什么，蹦出来的都是
+        「他常说『回来了回来了』」。印象该有自己的选择：先在候选池里，
+        按与这句话的字面重合重排，重合都一样才退回原来的权重序。
+        """
+        try:
+            cand = list(impression_mod.hint_lines(self.db, subject=subject,
+                                                  limit=pool, min_w=min_w) or [])
+        except Exception:
+            return []
+        if not cand or not query:
+            return cand[:limit]
+
+        def _g(s):
+            t = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", str(s or ""))
+            return set(t[i:i + 2] for i in range(len(t) - 1))
+
+        qg = _g(query)
+        if not qg:
+            return cand[:limit]
+        scored = [(len(qg & _g(line)), _i, line) for _i, line in enumerate(cand)]
+        hit = [x for x in scored if x[0] > 0]
+        if not hit:
+            return cand[:limit]
+        hit.sort(key=lambda x: (-x[0], x[1]))
+        # 命中的先上，不够 limit 就用权重序里的其它行补齐（别只剩一行）
+        picked = [x[2] for x in hit[:limit]]
+        if len(picked) < limit:
+            for line in cand:
+                if len(picked) >= limit:
+                    break
+                if line not in picked:
+                    picked.append(line)
+        return picked
+
     def impression_snapshot(self):
         return impression_mod.snapshot(self.db)
 
     def impression_fade(self, now=None):
         return impression_mod.fade(self.db, now=now if now is not None else self.clock.now())
+
+    def _impress_from_assoc(self, ids, now=None):
+        """联想带出来的旧记忆 → 间接印象（打折、低频）。2026-11-20。"""
+        if os.environ.get("WHALE_IMPRESSION", "1") == "0":
+            return 0
+        ids = [int(i) for i in (ids or [])][:2]
+        if not ids:
+            return 0
+        now = float(now if now is not None else self.clock.now())
+        try:
+            _last = self._meta_float("imp_assoc_ts")
+        except Exception:
+            _last = 0.0
+        if now - _last < 1800:      # 半小时只闻一次，别把联想变成记仇
+            return 0
+        done = 0
+        try:
+            q = ("SELECT id, raw, speaker FROM mem WHERE id IN (%s)"
+                 % ",".join("?" * len(ids)))
+            for r in self.db.execute(q, ids).fetchall():
+                raw = r[1] if not isinstance(r, dict) else r["raw"]
+                spk = r[2] if not isinstance(r, dict) else r["speaker"]
+                if str(spk or "") == "self":
+                    continue
+                if self._impress_write(str(raw or ""), now=now, via="indirect"):
+                    done += 1
+        except Exception as _ae:
+            print("[card2] 联想印象失败: %s" % _ae)
+            return 0
+        if done:
+            try:
+                self._set_meta_float("imp_assoc_ts", now)
+            except Exception:
+                pass
+        return done
+
+    def _impress_write(self, text, ts=None, speaker="user", about_uid=None, via="direct"):
+        """印象写入的独立入口（2026-11-20）。
+
+        放进 MixHabit 而不是散在 remember 里：印象层有自己的触发点和失败边界，
+        写坏了不该把整条记忆写入带崩。语义没变 —— 只记别人的话。
+        """
+        try:
+            _t = _strip_relay_prefix(text)
+            impression_mod.observe(
+                self.db,
+                subject=(about_uid or ("user" if (speaker or "") == "user" else "")),
+                text=_t, ts=(ts if ts is not None else self.clock.now()),
+                subject_kind=("person" if (about_uid or speaker) else "thing"),
+                now=self.clock.now(), via=via)
+            return True
+        except Exception as _ie:
+            print("[card2] 印象记账失败: %s" % _ie)
+            return False
+
+    # ---- V9.3 评价印象（affect）门面，2026-11-20 ------------------------
+    def affect_match(self, target_kind=None, target_tag=None, min_salience=0.0):
+        try:
+            import impression_eval as aff
+            return aff.match(self.db, target_kind, target_tag, min_salience)
+        except Exception:
+            return None
+
+    def affect_read(self, target_kind, target_tag):
+        try:
+            import impression_eval as aff
+            return aff.read(self.db, target_kind, target_tag)
+        except Exception:
+            return None
+
+    def affect_attach(self, target_kind, target_tag, mem_id):
+        try:
+            import impression_eval as aff
+            return aff.attach_mem(self.db, target_kind, target_tag, mem_id)
+        except Exception:
+            return []
+
+    def affect_hints(self, query="", limit=3):
+        """【态度】段的取数：他（人物）常驻一条 + 和这句话沾边的场景。"""
+        try:
+            import impression_eval as aff
+        except Exception:
+            return []
+        lines = []
+        try:
+            uid = self._affect_uid()
+            r = aff.read(self.db, "person", str(uid))
+            if r and float(r["salience"]) >= 0.08:
+                lines += aff.hint_lines(self.db, "person", str(uid), limit=1)
+        except Exception:
+            pass
+        try:
+            for it in aff.snapshot(self.db, limit=20):
+                if it["target_kind"] != "scene":
+                    continue
+                tag = str(it["target_tag"] or "")
+                if float(it["salience"]) < 0.08:
+                    continue
+                if tag and (tag in (query or "") or (query or "") in tag):
+                    lines += aff.hint_lines(self.db, "scene", tag, limit=1)
+                if len(lines) >= int(limit):
+                    break
+        except Exception:
+            pass
+        if not lines:
+            try:
+                lines = aff.hint_lines(self.db, limit=min(2, int(limit)))
+            except Exception:
+                lines = []
+        out, seen = [], set()
+        for x in lines:
+            if x not in seen:
+                out.append(x)
+                seen.add(x)
+        return out[:int(limit)]
+
+    def affect_snapshot(self, limit=50):
+        try:
+            import impression_eval as aff
+            return aff.snapshot(self.db, limit=limit)
+        except Exception:
+            return []
+
+    def affect_nudge(self, hs, target_kind, target_tag, step=None):
+        try:
+            import impression_eval as aff
+            return aff.mood_nudge(self.db, hs, target_kind, target_tag, step=step)
+        except Exception:
+            return {}
+
+    def affect_linked(self, uid=None, limit=32):
+        """他/这件事绑着哪些记忆（impression_eval 的 linked_mems）。"""
+        try:
+            import impression_eval as aff
+            r = aff.read(self.db, "person", str(uid or self._affect_uid()))
+        except Exception:
+            return []
+        if not r:
+            return []
+        out = []
+        for x in (r.get("linked_mems") or []):
+            try:
+                out.append(int(x))
+            except Exception:
+                continue
+        return out[:int(limit)]
+
+
+    # ---- 表达策略层（V9.6，SYNAPSE-1024 Speech Policy V1.0）----------------
+    def speech_policy_lines(self, max_chars=None):
+        """稳定格条文（已排序、已截断）。空列表 = 这一格省略。"""
+        try:
+            import speech_policy as sp
+            if max_chars is None:
+                return sp.block_lines(self.db)
+            return sp.block_lines(self.db, max_chars=int(max_chars))
+        except Exception:
+            # 策略格是「锦上添花」，取不到就安静省略这一格，绝不拖垮整轮。
+            return []
+
+    def speech_policy_snapshot(self):
+        try:
+            import speech_policy as sp
+            return sp.snapshot(self.db)
+        except Exception:
+            return {}
+
+    def speech_round_hint(self, query="", scene=None, pad=None, oxy=None, valence=None):
+        """本轮倾向：分流标签 + 称谓距离。返回 {"tag":..., "lines":[...]}。"""
+        try:
+            import speech_policy as sp
+            return sp.round_hint(query, pad=pad, scene=scene, oxy=oxy, valence=valence)
+        except Exception:
+            return {"tag": "", "lines": []}
+
+    def _affect_uid(self):
+        for attr in ("_affect_uid_cache", "about_uid", "_about_uid"):
+            v = getattr(self, attr, None)
+            if v:
+                return str(v)
+        try:
+            row = self.db.execute(
+                "SELECT about_uid FROM mem WHERE speaker='user' AND about_uid<>''"
+                " ORDER BY create_ts DESC LIMIT 1").fetchone()
+            if row and row[0]:
+                return str(row[0])
+        except Exception:
+            pass
+        return "user"
+
+    def _affect_learn(self, rpe, scenario="generic", uid=None, text=None):
+        """一句身体反应磨一次评价印象（人物 + 场景两个维度）。"""
+        try:
+            import impression_eval as aff
+        except Exception:
+            return 0
+        r = float(rpe or 0.0)
+        sev = min(1.0, abs(r))
+        n = 0
+        try:
+            aff.update(self.db, "person", str(uid or self._affect_uid()), r,
+                       severity=sev, note=str(scenario or "")[:40])
+            n += 1
+        except Exception:
+            pass
+        try:
+            aff.update(self.db, "scene", str(scenario or "generic"), r,
+                       severity=sev, note=(text or "")[:60])
+            n += 1
+        except Exception:
+            pass
+        return n
 
     def habit_hints(self, limit=5, max_chars=220):
         """从 habits 表捞几条稳定习惯，拼成短句给【我是谁】用。

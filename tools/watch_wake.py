@@ -66,7 +66,7 @@ def main():
     if not wm:
         write_wm(time.time())          # 首次启动：以现在为界，别把旧消息当新消息
         print("听筒上线，水位线 = 现在")
-        return_code = 2
+        return 2            # 首轮只建水位线：直接收工（原来漏了这行，5 条历史会被当新消息）
     else:
         print("听筒上线，水位线 = %s" % time.strftime("%m-%d %H:%M", time.localtime(wm)))
 

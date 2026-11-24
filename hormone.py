@@ -393,3 +393,61 @@ def describe(hs):
         "皮质醇": round(hs.get("h_cort", 0), 3),
         "催产素": round(hs.get("h_oxy", 0), 3),
     }
+
+
+SOFT_HI = 0.85      # 底色软上限：真人极少长期贴顶
+SOFT_LO = 0.15      # 底色软下限
+
+
+def soft(hs):
+    """底色软带：超出上限 / 低于下限的那一截只保留 70%（压掉 30%）。
+
+    真人极少长期贴顶或贴底；钳位只防溢出，不收力度。所有注入路径
+    （apply_event / tone_nudge / apply_r）最后都过这一道。
+    """
+    out = {}
+    for k in H_KEYS:
+        cur = float(hs.get(k, H_BASE.get(k, 0.5)))
+        if cur > SOFT_HI:
+            cur = SOFT_HI + (cur - SOFT_HI) * 0.7
+        elif cur < SOFT_LO:
+            cur = SOFT_LO - (SOFT_LO - cur) * 0.7
+        out[k] = _clamp(cur)
+    return out
+
+
+def apply_r(hs, r, scale=0.22, severity=0.0):
+    """V9.0：按奖励标量扰动四慢激素（四键 0..1，与 hormone.H_BASE 同刻度）.
+
+    正反馈：抬催产素/多巴胺，稍压皮质醇；负反馈：抬皮质醇、压血清素/多巴胺，
+    幅度再乘 (0.6 + 0.4*severity)（越狠越重）。小步：scale=0.22 只挪底色。
+    """
+    h = dict(hs or {})
+    r = float(r or 0.0)
+    sev = max(0.0, min(1.0, float(severity or 0.0)))
+    amp = min(1.0, abs(r) / 0.5) * float(scale)
+    if amp <= 0:
+        return h
+    if r > 0:
+        g = {"h_oxy": 0.9, "h_dopa": 0.7, "h_sero": 0.2, "h_cort": -0.2}
+    else:
+        w = 0.6 + 0.4 * sev
+        g = {"h_cort": 1.0 * w, "h_sero": -0.8 * w,
+             "h_dopa": -0.7 * w, "h_oxy": -0.3 * w}
+    for k, mul in g.items():
+        if k in h:
+            cur = _clamp(float(h[k]), 0.0, 1.0)
+            step = amp * abs(mul) * (1 if mul > 0 else -1)
+            # 2026-11-20（用户 m07166/m07214）：带余量推进 —— 越靠近顶/底动得越少，
+            #   不会连续几笔就粘死在 1.0 / 0.0 上（否则后面再夸再骂都推不动）。
+            room = (1.0 - cur) if step > 0 else cur
+            cur = _clamp(cur + step * (0.25 + 0.75 * room), 0.0, 1.0)
+            # 2026-11-20（用户 m07314）：底色往中间轻轻拉一点 —— 真人不会长期贴顶/贴底。
+            #   超出软带的部分只收 30%，不是硬夹：所以"极端情绪"还能短暂出现，
+            #   但不会连着几天卡在 1.00 / 0.00 上，看着像个人。
+            if cur > SOFT_HI:
+                cur = SOFT_HI + (cur - SOFT_HI) * 0.7
+            elif cur < SOFT_LO:
+                cur = SOFT_LO - (SOFT_LO - cur) * 0.7
+            h[k] = _clamp(cur, 0.0, 1.0)
+    return h

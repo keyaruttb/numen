@@ -170,6 +170,11 @@ def weight_now(w0, pool, t_anchor, now, region=None, tier=None,
     """
     if tier in CORE_TIERS:
         return _clamp01(w0)
+    # 2026-11-21（E1 发现）：keep 原来只挡"自动清理"，权重照旧按 LAM_M 掉，
+    # 两个月就跌破 SHOW_HINT=0.15 —— 等于"保住的那条"其实看不着。
+    # 现在 keep 走长期池速率（半衰期 ~371 天），配额 200 挡上限。
+    if tier == "keep" and t_anchor and now > t_anchor:
+        return _clamp01(w0) * math.exp(-LAM_L * max(0.0, now - t_anchor))
     # 🔧 2026-11-05（完备性体检）：两个必须兜的边角。
     #    a) w 本身越界（脏数据 / 别处的 bug 写进来）：以前原样透传 ——
     #       1.5 会永远排第一且永远衰减不到回收线，-1 会永远垫底。

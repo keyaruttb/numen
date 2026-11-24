@@ -1,0 +1,126 @@
+{
+ "rows": 2478,
+ "tiers": {
+  "mid": 2237,
+  "keep": 80,
+  "core_mutable": 161
+ },
+ "promotable": 3,
+ "show_hint": 0.15,
+ "by_arm": {
+  "a": {
+   "30": {
+    "visible": 0.9605,
+    "mean_w": 0.3999,
+    "by_tier": {
+     "mid": 0.9562,
+     "keep": 1.0,
+     "core_mutable": 1.0
+    }
+   },
+   "90": {
+    "visible": 0.4802,
+    "mean_w": 0.412,
+    "by_tier": {
+     "keep": 1.0,
+     "core_mutable": 1.0,
+     "mid": 0.4242
+    }
+   },
+   "180": {
+    "visible": 0.2248,
+    "mean_w": 0.5921,
+    "by_tier": {
+     "keep": 1.0,
+     "core_mutable": 1.0,
+     "mid": 0.1413
+    }
+   },
+   "365": {
+    "visible": 0.1723,
+    "mean_w": 0.6235,
+    "by_tier": {
+     "keep": 0.9875,
+     "core_mutable": 1.0,
+     "mid": 0.0836
+    }
+   }
+  },
+  "b": {
+   "30": {
+    "visible": 0.958,
+    "mean_w": 0.3978,
+    "by_tier": {
+     "mid": 0.9549,
+     "keep": 0.9625,
+     "core_mutable": 1.0
+    }
+   },
+   "90": {
+    "visible": 0.4778,
+    "mean_w": 0.4038,
+    "by_tier": {
+     "keep": 0.9625,
+     "core_mutable": 1.0,
+     "mid": 0.4229
+    }
+   },
+   "180": {
+    "visible": 0.2191,
+    "mean_w": 0.5346,
+    "by_tier": {
+     "keep": 0.875,
+     "core_mutable": 0.9938,
+     "mid": 0.1399
+    }
+   },
+   "365": {
+    "visible": 0.1521,
+    "mean_w": 0.5096,
+    "by_tier": {
+     "keep": 0.4125,
+     "core_mutable": 0.9938,
+     "mid": 0.0823
+    }
+   }
+  },
+  "c": {
+   "30": {
+    "visible": 1.0,
+    "mean_w": 0.5914,
+    "by_tier": {
+     "mid": 1.0,
+     "keep": 1.0,
+     "core_mutable": 1.0
+    }
+   },
+   "90": {
+    "visible": 1.0,
+    "mean_w": 0.5914,
+    "by_tier": {
+     "mid": 1.0,
+     "keep": 1.0,
+     "core_mutable": 1.0
+    }
+   },
+   "180": {
+    "visible": 1.0,
+    "mean_w": 0.5914,
+    "by_tier": {
+     "mid": 1.0,
+     "keep": 1.0,
+     "core_mutable": 1.0
+    }
+   },
+   "365": {
+    "visible": 1.0,
+    "mean_w": 0.5914,
+    "by_tier": {
+     "mid": 1.0,
+     "keep": 1.0,
+     "core_mutable": 1.0
+    }
+   }
+  }
+ }
+}

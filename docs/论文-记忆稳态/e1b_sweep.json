@@ -1,0 +1,249 @@
+{
+ "n": 85,
+ "note": "hits-only sensitivity; no re-retrieval",
+ "thresholds": [
+  0.05,
+  0.1,
+  0.15,
+  0.2,
+  0.3
+ ],
+ "ks": [
+  5,
+  10,
+  13
+ ],
+ "days": [
+  0,
+  30,
+  90
+ ],
+ "base_th": 0.15,
+ "grid": {
+  "0d_k5_th0.05": {
+   "r_at_k": 42.4,
+   "ev_visible": 10.6,
+   "gate_r_at_k": 11.8
+  },
+  "0d_k5_th0.10": {
+   "r_at_k": 42.4,
+   "ev_visible": 9.4,
+   "gate_r_at_k": 10.6
+  },
+  "0d_k5_th0.15": {
+   "r_at_k": 42.4,
+   "ev_visible": 9.4,
+   "gate_r_at_k": 10.6
+  },
+  "0d_k5_th0.20": {
+   "r_at_k": 42.4,
+   "ev_visible": 9.4,
+   "gate_r_at_k": 10.6
+  },
+  "0d_k5_th0.30": {
+   "r_at_k": 42.4,
+   "ev_visible": 9.4,
+   "gate_r_at_k": 10.6
+  },
+  "0d_k10_th0.05": {
+   "r_at_k": 49.4,
+   "ev_visible": 12.9,
+   "gate_r_at_k": 14.1
+  },
+  "0d_k10_th0.10": {
+   "r_at_k": 49.4,
+   "ev_visible": 11.8,
+   "gate_r_at_k": 12.9
+  },
+  "0d_k10_th0.15": {
+   "r_at_k": 49.4,
+   "ev_visible": 11.8,
+   "gate_r_at_k": 12.9
+  },
+  "0d_k10_th0.20": {
+   "r_at_k": 49.4,
+   "ev_visible": 11.8,
+   "gate_r_at_k": 12.9
+  },
+  "0d_k10_th0.30": {
+   "r_at_k": 49.4,
+   "ev_visible": 11.8,
+   "gate_r_at_k": 12.9
+  },
+  "0d_k13_th0.05": {
+   "r_at_k": 51.8,
+   "ev_visible": 15.3,
+   "gate_r_at_k": 16.5
+  },
+  "0d_k13_th0.10": {
+   "r_at_k": 51.8,
+   "ev_visible": 14.1,
+   "gate_r_at_k": 15.3
+  },
+  "0d_k13_th0.15": {
+   "r_at_k": 51.8,
+   "ev_visible": 14.1,
+   "gate_r_at_k": 15.3
+  },
+  "0d_k13_th0.20": {
+   "r_at_k": 51.8,
+   "ev_visible": 14.1,
+   "gate_r_at_k": 15.3
+  },
+  "0d_k13_th0.30": {
+   "r_at_k": 51.8,
+   "ev_visible": 14.1,
+   "gate_r_at_k": 15.3
+  },
+  "30d_k5_th0.05": {
+   "r_at_k": 42.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 1.2
+  },
+  "30d_k5_th0.10": {
+   "r_at_k": 42.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 1.2
+  },
+  "30d_k5_th0.15": {
+   "r_at_k": 42.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 1.2
+  },
+  "30d_k5_th0.20": {
+   "r_at_k": 42.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 1.2
+  },
+  "30d_k5_th0.30": {
+   "r_at_k": 42.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 1.2
+  },
+  "30d_k10_th0.05": {
+   "r_at_k": 49.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 1.2
+  },
+  "30d_k10_th0.10": {
+   "r_at_k": 49.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 1.2
+  },
+  "30d_k10_th0.15": {
+   "r_at_k": 49.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 1.2
+  },
+  "30d_k10_th0.20": {
+   "r_at_k": 49.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 1.2
+  },
+  "30d_k10_th0.30": {
+   "r_at_k": 49.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 1.2
+  },
+  "30d_k13_th0.05": {
+   "r_at_k": 51.8,
+   "ev_visible": 1.2,
+   "gate_r_at_k": 2.4
+  },
+  "30d_k13_th0.10": {
+   "r_at_k": 51.8,
+   "ev_visible": 1.2,
+   "gate_r_at_k": 2.4
+  },
+  "30d_k13_th0.15": {
+   "r_at_k": 51.8,
+   "ev_visible": 1.2,
+   "gate_r_at_k": 2.4
+  },
+  "30d_k13_th0.20": {
+   "r_at_k": 51.8,
+   "ev_visible": 1.2,
+   "gate_r_at_k": 2.4
+  },
+  "30d_k13_th0.30": {
+   "r_at_k": 51.8,
+   "ev_visible": 1.2,
+   "gate_r_at_k": 2.4
+  },
+  "90d_k5_th0.05": {
+   "r_at_k": 42.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  },
+  "90d_k5_th0.10": {
+   "r_at_k": 42.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  },
+  "90d_k5_th0.15": {
+   "r_at_k": 42.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  },
+  "90d_k5_th0.20": {
+   "r_at_k": 42.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  },
+  "90d_k5_th0.30": {
+   "r_at_k": 42.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  },
+  "90d_k10_th0.05": {
+   "r_at_k": 49.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  },
+  "90d_k10_th0.10": {
+   "r_at_k": 49.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  },
+  "90d_k10_th0.15": {
+   "r_at_k": 49.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  },
+  "90d_k10_th0.20": {
+   "r_at_k": 49.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  },
+  "90d_k10_th0.30": {
+   "r_at_k": 49.4,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  },
+  "90d_k13_th0.05": {
+   "r_at_k": 51.8,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  },
+  "90d_k13_th0.10": {
+   "r_at_k": 51.8,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  },
+  "90d_k13_th0.15": {
+   "r_at_k": 51.8,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  },
+  "90d_k13_th0.20": {
+   "r_at_k": 51.8,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  },
+  "90d_k13_th0.30": {
+   "r_at_k": 51.8,
+   "ev_visible": 0.0,
+   "gate_r_at_k": 0.0
+  }
+ }
+}

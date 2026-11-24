@@ -1,0 +1,130 @@
+{
+ "e3": {
+  "intentions_before": 74,
+  "intentions_active_after": 0,
+  "learn_tasks_before": 25,
+  "learn_tasks_after": 26,
+  "new_tasks": 1,
+  "actions": {
+   "ok": true,
+   "done": [
+    [
+     "learn",
+     "learn_more",
+     "我也怕麻烦，能躺着不坐着\n等他们踩平坑，你捡现成的"
+    ]
+   ]
+  },
+  "learn_task_by_source": [
+   {
+    "source": "chat",
+    "n": 2
+   },
+   {
+    "source": "intention",
+    "n": 19
+   },
+   {
+    "source": "self",
+    "n": 1
+   },
+   {
+    "source": "user_interest",
+    "n": 1
+   },
+   {
+    "source": "user_question",
+    "n": 3
+   }
+  ]
+ },
+ "e4": {
+  "sample_n": 12,
+  "hit_n": 9,
+  "hit_rate": 0.75,
+  "regions": [
+   "chatter",
+   "episode",
+   "fact",
+   "preference",
+   "self",
+   "study"
+  ],
+  "len_min": 15,
+  "len_max": 364,
+  "sample": [
+   {
+    "mid": 3429,
+    "region": "episode",
+    "len": 137,
+    "tier": "mid"
+   },
+   {
+    "mid": 3494,
+    "region": "episode",
+    "len": 323,
+    "tier": "keep"
+   },
+   {
+    "mid": 2780,
+    "region": "chatter",
+    "len": 19,
+    "tier": "mid"
+   },
+   {
+    "mid": 3202,
+    "region": "chatter",
+    "len": 15,
+    "tier": "mid"
+   },
+   {
+    "mid": 1407,
+    "region": "fact",
+    "len": 34,
+    "tier": "mid"
+   },
+   {
+    "mid": 3386,
+    "region": "fact",
+    "len": 358,
+    "tier": "mid"
+   },
+   {
+    "mid": 1526,
+    "region": "study",
+    "len": 364,
+    "tier": "core_mutable"
+   },
+   {
+    "mid": 3490,
+    "region": "study",
+    "len": 298,
+    "tier": "mid"
+   },
+   {
+    "mid": 496,
+    "region": "preference",
+    "len": 74,
+    "tier": "core_mutable"
+   },
+   {
+    "mid": 1439,
+    "region": "preference",
+    "len": 33,
+    "tier": "mid"
+   },
+   {
+    "mid": 1704,
+    "region": "self",
+    "len": 100,
+    "tier": "keep"
+   },
+   {
+    "mid": 3109,
+    "region": "self",
+    "len": 21,
+    "tier": "mid"
+   }
+  ]
+ }
+}

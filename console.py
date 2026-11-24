@@ -3159,6 +3159,32 @@ function loadLayers(){
   }else{
     out.push('<div style="color:#3f5164">队列空着 —— 想到什么要学的，我可以自己排进去</div>');
   }
+  /* V9.0：反馈环 —— 态度（底色）、意向（想做什么）、复盘（攒够证据的总结）。 */
+  var fb=d.fb||{}, fs=fb.stats||{};
+  if(!fs.err){
+    var af=(fb.affect||[])[0]||{};
+    var ints=(fb.intentions||[]).filter(function(it,i,arr){
+      return arr.findIndex(function(o){return o.direction===it.direction&&o.kind===it.kind;})===i;
+    }).slice(0,2);
+    var revs=(fb.reviews||[]).slice(0,1);
+    var line='<div style="margin:6px 0"><span style="color:#e8b44a">态度</span> ';
+    if(af && af.valence!==undefined){
+      line+='对'+(af.target_kind==='person'?'他':'这事')+' '+
+        (af.valence>0.08?'偏暖':(af.valence<-0.08?'偏冷':'说不上好坏'))+
+        '（安全感 '+Number(af.safety||0).toFixed(2)+'）';
+    }else{ line+='还没磨出来'; }
+    line+=' · 反馈 <b>'+esc(String(fs.settled||0))+'</b> 条 · 复盘 <b>'+esc(String(fs.reviews||0))+'</b> 组';
+    out.push(line+'</div>');
+    ints.forEach(function(it){
+      out.push('<div style="color:#9fb0c4">· 想'+(it.direction==='approach'?'做':'躲')+
+        ' '+esc(String(it.kind||""))+'（'+esc(String(it.drive||""))+' '+Number(it.urge||0).toFixed(2)+'）</div>');
+    });
+    revs.forEach(function(rv){
+      out.push('<div style="color:#9fb0c4">· 复盘 '+esc(String(rv.side||""))+' / '+
+        esc(String(rv.angle||""))+'（'+Number(rv.strength||0).toFixed(2)+'）'+
+        esc(String(rv.summary||"").slice(0,40))+'</div>');
+    });
+  }
   box.innerHTML=out.join("");
 }
 

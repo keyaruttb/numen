@@ -117,7 +117,7 @@ def bump(d, kind, amount=0.15):
     # 然后要五个小时才回得来。人不是这样的：聊得越多越麻木，但不会归零。
     # 所以压一个地板：最多泄到底线的一小截。
     _floor = 0.15
-    d[kind] = max(min(_floor, float(b)), min(1.5, d[kind] - float(amount)))
+    d[kind] = max(_floor, min(1.5, d[kind] - float(amount)))
     return d
 
 
@@ -233,6 +233,38 @@ def candidates(d, ctx=None):
                 it["urgency"] = round(it["urgency"] * 0.30, 3)
         if it["kind"] == "learn" and learned_today >= LEARN_DAILY_CAP:
             it["urgency"] = round(it["urgency"] * 0.30, 3)
+
+    # ⑨ V9.2：行为意向池加权 —— 趋近提紧急度、回避压紧急度（压不否决）
+    _ints = ctx.get("intentions") or []
+    if _ints:
+        _ap, _av = {}, {}
+        for _i in _ints:
+            try:
+                _u = float(_i.get("urge") or 0.0)
+            except Exception:
+                continue
+            _dr = str(_i.get("drive") or "")
+            if not _dr:
+                continue
+            if str(_i.get("direction")) == "approach":
+                _ap[_dr] = min(1.0, _ap.get(_dr, 0.0) + _u)
+            else:
+                _av[_dr] = min(1.0, _av.get(_dr, 0.0) + _u)
+        for it in out:
+            _dr = str(it.get("drive") or "")
+            if _ap.get(_dr):
+                it["urgency"] = round(min(1.0, it["urgency"] * (1 + 0.35 * _ap[_dr])), 3)
+            if _av.get(_dr):
+                it["urgency"] = round(max(0.0, it["urgency"] * (1 - 0.40 * _av[_dr])), 3)
+        # self_check 且当前没有整理候选 → 补一条低紧急度 tidy（自查）
+        _sc = [i for i in _ints if str(i.get("kind")) == "self_check"]
+        _has_tidy = any(str(i.get("kind")) == "tidy" for i in out)
+        if _sc and not _has_tidy and DESIRES.get("tidy"):
+            out.append({"kind": "tidy", "drive": "order",
+                        "urge": 0.3, "urgency": 0.30,
+                        "cost": DESIRES["tidy"][1], "risk": DESIRES["tidy"][2],
+                        "why": "有个地方想自查一下（意向 %.2f）"
+                               % float(_sc[0].get("urge") or 0.0)})
     return out
 
 

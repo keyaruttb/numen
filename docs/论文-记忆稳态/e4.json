@@ -1,0 +1,110 @@
+{
+ "sample_n": 12,
+ "check": [
+  7,
+  [
+   [
+    1256,
+    "所以你那台必须带核显才能"
+   ],
+   [
+    1374,
+    "数字生命派指挥部"
+   ],
+   [
+    1438,
+    "汐汐和她的朋友们"
+   ],
+   [
+    1421,
+    "汐汐和她的朋友们"
+   ],
+   [
+    1704,
+    "我的正式名字是汐音"
+   ]
+  ]
+ ],
+ "items": [
+  {
+   "id": 1256,
+   "region": "episode",
+   "tier": "mid",
+   "len": 80
+  },
+  {
+   "id": 3389,
+   "region": "episode",
+   "tier": "mid",
+   "len": 92
+  },
+  {
+   "id": 2976,
+   "region": "chatter",
+   "tier": "mid",
+   "len": 21
+  },
+  {
+   "id": 1500,
+   "region": "chatter",
+   "tier": "mid",
+   "len": 16
+  },
+  {
+   "id": 1374,
+   "region": "fact",
+   "tier": "mid",
+   "len": 24
+  },
+  {
+   "id": 1174,
+   "region": "fact",
+   "tier": "mid",
+   "len": 32
+  },
+  {
+   "id": 1228,
+   "region": "study",
+   "tier": "core_mutable",
+   "len": 480
+  },
+  {
+   "id": 3490,
+   "region": "study",
+   "tier": "mid",
+   "len": 298
+  },
+  {
+   "id": 1438,
+   "region": "preference",
+   "tier": "mid",
+   "len": 100
+  },
+  {
+   "id": 1421,
+   "region": "preference",
+   "tier": "mid",
+   "len": 55
+  },
+  {
+   "id": 3665,
+   "region": "self",
+   "tier": "mid",
+   "len": 33
+  },
+  {
+   "id": 1704,
+   "region": "self",
+   "tier": "mid",
+   "len": 100
+  }
+ ],
+ "regions": [
+  "chatter",
+  "episode",
+  "fact",
+  "preference",
+  "self",
+  "study"
+ ]
+}
