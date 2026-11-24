@@ -1,0 +1,19 @@
+{
+  "name": "dsh-thinking-guard",
+  "version": "0.1.0",
+  "description": "Observe a reasoning stream and write a verdict when a turn degenerates into phrase repetition (the '复读坡面期' failure mode). Read-only: it never modifies, truncates or drops a chunk.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib", "test", "cordis.patch.yml", "README.md"],
+  "license": "MIT",
+  "keywords": ["deepseek", "dsh", "dsh-plugin", "reasoning", "degeneration", "guard"],
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node test/smoke.mjs" },
+  "peerDependencies": { "@deepseek-ai/cordis": "^4.0.1" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

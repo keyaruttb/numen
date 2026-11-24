@@ -1,0 +1,9 @@
+# dsh bundle patch: 把本插件插进 profile 的层栈。
+# name 必须和包名一致，loader 才能从 profile 的 node_modules 里 import。
+- insert:
+    - id: dsh-thinking-guard
+      name: 'dsh-thinking-guard'
+      # config:
+      #   logFile: 'C:\\dsh\\_ops\\safe\\thinking-guard.log'
+      #   repeatMin: 50
+      #   enabled: true

@@ -1,0 +1,15 @@
+# dsh-numen-autoreport bundle patch。
+#
+# 一个插件、一个 fiber，不需要别的 bundle 层。
+# 装法（本地开发用 junction，不经过 pnpm，避免把 lockfile 搞坏）：
+#   mklink /J "%USERPROFILE%\.dsh\profiles\web\node_modules\dsh-numen-autoreport" "C:\dsh\_card\dsh-autoreport"
+- insert:
+    - id: numen-autoreport
+      name: dsh-numen-autoreport
+      config:
+        host: 127.0.0.1
+        port: 8848
+        tokenFile: 'C:\dsh\_card\qq_state\api_token.txt'
+        source: 'autoreport'
+        keepTurns: 20
+        enabled: true
