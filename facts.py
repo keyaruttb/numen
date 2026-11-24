@@ -647,6 +647,7 @@ def record(db, mem_id, text, ts=None, speaker="user", source=""):
     source 决定这条能不能进永久区：只有"人真的说过的话"才配不衰减。
     施工汇报、评测卡、群聊扫描这些是记录，不是生活，抽错了会一直错下去。
     """
+    ensure(db)          # 2026-11-21：record() 原本假定调用方已经 ensure 过
     items = extract(text, ts=ts)
     # 没主语的「腰不好 / 不吃芹菜」，跟着上一句的主语走（见 _prev_subject）
     if items and "我" not in (text or ""):

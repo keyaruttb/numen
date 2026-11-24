@@ -54,6 +54,7 @@ for _v in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS',
     os.environ[_v] = '1'
 
 import hormone
+import hormone_feedback as hf_mod
 import viscera
 import motiv
 import padlib
@@ -408,6 +409,10 @@ TIER_CORE_MUTABLE = "core_mutable"   # 会变的底色
 TIER_CORE_TAG = "core_tag"           # 人物角色标签
 TIER_CORE_FIXED = "core_fixed"       # 骨头
 CORE_TIERS = (TIER_CORE_MUTABLE, TIER_CORE_TAG, TIER_CORE_FIXED)
+TIER_PROTECTED = "keep"     # 受保护：不吃「久不访问」的侵蚀/下沉
+TIER_EPHEMERAL = "flash"    # 短暂：超过 FLASH_TTL 直接降级成空壳
+RETENTION_TIERS = CORE_TIERS + (TIER_PROTECTED, TIER_EPHEMERAL)
+FLASH_TTL = 7 * 86400.0     # 短暂档的寿命（秒）
 
 # 中期 → 长期：原来只看权重 0.60，太松（"当时很激动"就能进）。
 # 现在要"验票"：权重 ≥ 0.80，并且之后还被想起来过。
@@ -900,19 +905,73 @@ REGION_BOOST = 1.25
 # 默认值来自 10-30 在 20 条真实查询上的网格搜索；10-31 修好候选集/分区/BLAS 后
 # 由 eval_weights.py 重新扫描一遍确认（见那个脚本开头的说明）。
 #
-# 🔴 2026-11-17（用户 m01113「确定优化就融合到真卡」）：改成 (1.00, 0.30, 0, 0)。
-#    两头都测过，不是拍脑袋：
-#    · 真卡尺子（tools/eval/cases.json 23 条，R@1 / R@3 / EVID）：
-#        base (0.35,.30,.20,.10) = 62.5 / 75.0 / 66.7
-#        这一版 (1.00,.30,0,0)   = 62.5 / 75.0 / 100.0（evid 三条全中，13 号也捞回来了）
-#        纯余弦 (1,0,0,0)        = 37.5 / 50.0 / 33.3 —— 真卡上会明显退步，所以 cover 必须留。
-#    · bench（M01 417 题，全量 / 有证据轮 305）：base = 3.8 / 5.2；
-#        这一版 = 34.1 / 46.6（纯余弦 31.9 / 43.6，块检索 34.3 / 46.9）。
-#    → wn（清晰度）和新近（recency）在两个尺子上都是噪声：去掉它们 EVID 66.7→100、
-#      bench 也从 31.9 抬到 34.1；留着只会把真命中的记忆往后压。
-#    注意和不再是 1（1.30）：乘子是乘在总分上的，整体等比缩放不改变顺序，所以不必归一。
-#    回退：把下面这行改回 (0.35, 0.30, 0.20, 0.10)，并把 RECALL_NARROW_MAX 改回 6、RECALL_CAP_MAX 改回 12。
-SCORE_W = (1.00, 0.30, 0.00, 0.00)
+# 打分权重（2026-11-19 定稿）。四段依次是：语义融合分 / 实词覆盖率 / 清晰度 / 新近。
+#   · 清晰度(wn) 与新近(recency) 一律归零：两把尺子上它们都是噪声，留着只会把真命中的记忆往后压。
+#   · 语义与覆盖的比例 0.35 : 0.30（不是 1.00 : 0.30）—— 2026-11-19 复查时把权重拉到纯余弦侧
+#     (1.00, .30, 0, 0) 在「刷新过的真卡快照」上退步了：
+#        (1.00,.30,0,0)  R@1 50.0 / R@3 75.0 / EVID 66.7
+#        (0.35,.30,0,0)  R@1 62.5 / R@3 75.0 / EVID 100.0   ← 现在用的
+#     原因很直白：卡里越往后越会有「说法相近的记忆」（梦境摘要、学习笔记），
+#     余弦主导时它们会把真正的证据挤下去；cover 主导更抗这种稀释。
+#   · bench（M01 417 题，有证据轮 305，虚拟时钟口径）两档基本打平：139/305=45.6% vs 140/305=45.9%。
+#   · 回退：改成 (0.35, 0.30, 0.20, 0.10) 并把 RECALL_NARROW_MAX 回 6、RECALL_CAP_MAX 回 12。
+def _brief_line(raw, limit=110):
+    """一条原文压成一行短句（给【联想】【学过的】这类独立部件用）。
+
+    只负责「别把整段原文塞进上下文」，不参与任何打分。
+    """
+    try:
+        s = re.sub(r"\s+", " ", str(raw or "")).strip()
+    except Exception:
+        return ""
+    s = s.strip(" -—·•　")
+    if len(s) > limit:
+        cut = s[:limit]
+        for sep in ("。", "，", "；", "！", "？"):
+            k = cut.rfind(sep)
+            if k >= limit // 3:
+                cut = cut[:k + 1]
+                break
+        s = cut
+    return s
+
+
+SCORE_W = (0.35, 0.30, 0.00, 0.00)
+# 后两项是「权重项」与「新近项」，不是下面并集的另外两路。
+# 2026-11-21 有人问过这个：注释夸并集、代码却把它们归零，看着像改到一半。
+# 实际情况 —— 并集（RRF）端到端只有 46.6%，比单路余弦的 50.2% 还低（+1 在噪声内），
+# 所以并集留在实验开关里（WHALE_UNION），生产打分只保留语义 + 字面。
+
+# ---- V9 候选并集（2026-11-19）------------------------------------------
+# 417 题实测（bench，只读副本）：单通道语义 50.2% / 分块 46.9% / 字面 39.3%，
+# 四路加权 RRF 并集 52.8%；证据进任一通道前 300 的占 81.0%（候选天花板）。
+# 结论：多向量有用靠「并集 + 名次融合」，不靠换更贵的模型；RRF 只用名次，
+# 所以 512 维（整条 bge-small）与 768 维（分块 bge-base）可以同池并排。
+# 默认关：WHALE_UNION=1 打开；WHALE_UNION_K 融合常数（默认 60）；
+# WHALE_UNION_W 四通道权重（默认 0.40/0.30/0.20/0.10）。
+_UNION_ON = os.environ.get("WHALE_UNION", "0") == "1"
+# 渲染去重（实验臂）：近似重复的记忆只留第一条，别把 13 个格子占光。
+_DEDUP_ON = os.environ.get("WHALE_DEDUP", "0") == "1"
+try:
+    _DEDUP_TH = float(os.environ.get("WHALE_DEDUP_TH", "0.82") or 0.82)
+except Exception:
+    _DEDUP_TH = 0.82
+_UNION_K = float(os.environ.get("WHALE_UNION_K", "60") or 60)
+try:
+    _UNION_W = tuple(float(x) for x in
+                     (os.environ.get("WHALE_UNION_W", "0.40,0.30,0.20,0.10")
+                      or "0.40,0.30,0.20,0.10").split(","))
+    if len(_UNION_W) != 4:
+        raise ValueError("need 4 weights")
+except Exception:
+    _UNION_W = (0.40, 0.30, 0.20, 0.10)
+
+def _bigrams(s):
+    s = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", s or "")
+    return {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+
 
 # 🔧 2026-11-09（用户 m04652）：两处检索偏心，都不是新机制，是把已有的
 #    「什么值得被想起来」这条原则补回到打分里。
@@ -1265,17 +1324,24 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             self._conn_release(conn)
 
     def __init__(self, db_path=":memory:", clock=None, card_dir=None):
-        # 2026-11-19：_schema_heal() 原在这里调用，但那时 self._db_main 还没建，
-        # 每次 AttributeError 被吞掉 ⇒ heal 从没执行过。挪到 _init_schema() 之后。
+        # 2026-11-19：这里原来先调了一次 _schema_heal()，但那时 self.db / db_path 还没就位，
+        # 异常被 except 吞掉 —— 等于没补。真正的补齐挪到 _init_schema()/_migrate() 之后。
+        # （合并说明 2026-11-24：二改侧和上游侧是同一个修复的两份注释，取上游这份，
+        #   它多提了 _migrate()。实际代码两边一致，没有行为差异。）
         self.clock = clock or Clock()
         self.db_path = db_path
         # 承诺账本（2026-11-11 接进读侧）：表在同一个库里，但**不在 mem 池**——
         # 它不是记忆，不参与召回打分、不参与衰减。这里只保证表存在（幂等）。
         try:
             import promises as _pm0
-            _pm0.ensure(_pm0.connect(self.db_path))
+            # 2026-11-19（V9 审阅 #26 写入可靠性）：这条连接要留住句柄，
+            # 在 close() 里关掉 —— 原来直接 ensure(connect(...)) 开完就丢，
+            # 连接挂到进程退出，Windows 下临时库文件删不掉。
+            self._pm_conn = _pm0.connect(self.db_path)
+            _pm0.ensure(self._pm_conn)
             self._promises_ok = True
         except Exception as _pe0:
+            self._pm_conn = None
             self._promises_ok = False
             soft_fail("promise_ensure", _pe0)
         # 卡目录（放 .lifecard / 快照用），不传就取库文件所在目录
@@ -1335,6 +1401,12 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         self._session_hit_ids = set()
         self._init_schema()
         self._migrate()
+        # 2026-11-19：结构补齐放在建表/迁移之后（全新卡的 mem 只有 45 列，而 remember()
+        # 要写 sess/who/place/ev_kind；inbox/timeline/mem_birth 也是懒建）。幂等。
+        try:
+            self._schema_heal()
+        except Exception:
+            pass
         self._ensure_soft_cols()
         # 2026-11-19：heal 必须在 _db_main 建好、schema 建完之后跑（它要用 self.db）。
         # 原来在 __init__ 开头调用，库还没开 ⇒ AttributeError 被 except 吞掉 ⇒ 从没执行过。
@@ -1350,6 +1422,17 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         self._load_oxy()
         self._load_mood()
         self._load_hormones()
+        # V9.8 激素负反馈调节器：高浓度时下调分泌增益、加速清除（滞回防抖）
+        try:
+            self.hf = hf_mod.Regulator(cfg=hf_mod.cfg_from_meta(self.db))
+            _hfs = hf_mod.load_state(self.db)
+            if _hfs:
+                self.hf.load_dict(_hfs)
+        except Exception as _hfe:
+            print("[card2] 激素负反馈装配失败: %s" % _hfe)
+            self.hf = None
+        self._hf_mods = {}
+        self._hf_last_events = []
         self._load_viscera()
         self._load_viscera_profile()
         self._load_motiv()
@@ -1392,6 +1475,14 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         #    之前它们是独立模块，测试各自过、但卡自己并不知道它们存在，
         #    等于两块零件做完了没装上。这里共享同一个 sqlite 连接。
         self.skill = skill.SkillMemory(self.db)
+        # V10.8：卡里有 vec 为空的技能（id=4/5 的 len(vec)=2），
+        # skill.search() 对空 vec 直接 continue —— 补一次，只填空行。
+        try:
+            _nv = self.skill.ensure_vecs(to_vec)
+            if _nv:
+                print("[card2] 技能向量补齐 %d 条" % _nv)
+        except Exception as _sv:
+            soft_fail("skill_ensure_vecs", _sv)
         # 这里必须传 self.card_dir 而不是参数 card_dir：不传参时 card_dir 是
         # None，而 self.card_dir 已经退回「库文件所在目录」了。传参数会让
         # 头像/身份卡找不到落盘位置（2026-10-31 换头像时报「没有卡目录」）。
@@ -1465,6 +1556,15 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         self._detail_emb_cache = {}
         # 🔧 T4-3c：主干向量缓存（mem_id -> np.ndarray）
         self._core_vec_cache = {}
+        # V9.0–V9.3 反馈与反思闭环：五张表由 feedback_loop.ensure 建/补列（幂等），
+        # 装配失败不拖垮开卡（反馈是旁路，坏一层不毁主链）。
+        self.feedback = None
+        try:
+            import feedback_loop as _fbm
+            _fbm.ensure(self.db)
+            self.feedback = _fbm.FeedbackLoop(self)
+        except Exception as _e:
+            print("[card2] 反馈环装配失败:", _e)
 
     # ---------- 内分泌四激素（V5.0 §4 / T3-2）----------
     def _load_hormones(self):
@@ -1488,6 +1588,8 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     "INSERT INTO meta(key,val) VALUES(?,?)"
                     " ON CONFLICT(key) DO UPDATE SET val=excluded.val",
                     (k, repr(self.h[k])))
+            if getattr(self, "hf", None) is not None:
+                hf_mod.save_state(self.db, self.hf)
             self.db.commit()
         except Exception:
             pass
@@ -1573,6 +1675,12 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             dt_h = max(0.0, min(72.0, (now - float(self.mo["ts"])) / 3600.0))
         self.mo["d"] = motiv.settle(self.mo["d"], dt_h)
         self.mo["ts"] = now
+        # V9.2：先把意向池按半衰期衰减，再让它参与候选加权
+        try:
+            if self.feedback is not None:
+                self.feedback.decay_intentions(now=now)
+        except Exception:
+            pass
         # 🔧 2026-11-09：settle 只往基线靠，但基线不是 0 ——
         #    如果刚聊完，attachment/care 被满足、低于基线，settle 会把它们拉回基线，
         #    但不会**超过**基线。没有人超基线 → candidates 不产出 → 【动机】永远空。
@@ -1602,6 +1710,11 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                "quiet": bool(quiet), "at_school": bool(at_school),
                "sent_today": int((self.mo.get("sent") or {}).get(dk, 0)),
                "learned_today": int((self.mo.get("learned") or {}).get(dk, 0))}
+        try:
+            _ints = (self.feedback.active_intentions() if self.feedback is not None else [])
+        except Exception:
+            _ints = []
+        ctx["intentions"] = _ints
         cands = motiv.candidates(self.mo["d"], ctx)
         chosen, rejected = motiv.arbitrate(cands, ctx)
         res = {"now": now, "dt_hours": round(dt_h, 3),
@@ -1994,10 +2107,29 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 res = None
         if res is not None:
             self.v = link.apply_to(v, res, dt, now=now)
+            # 2026-11-20 V9.3：这一句的身体反应也磨一次评价印象。
+            #   r 用 RPE（比预期好/差多少），场景用 emotion_link 判出来的 scenario，
+            #   人物维度按当前对话对象（他）记。慢磨：一条只挪 0.08 量级的步长。
+            try:
+                _rpe = float(getattr(res, "rpe", 0.0) or 0.0)
+                _sc = str(getattr(res, "scenario", "") or "generic")
+                _uid = None
+                try:
+                    _uid = self._affect_uid()
+                except Exception:
+                    _uid = None
+                if abs(_rpe) >= 0.02:
+                    self._affect_learn(_rpe, _sc, _uid, text)
+            except Exception:
+                pass
         else:
             events = viscera.guess(text, emotion)
             self.v = viscera.step(v, dt, events)
         self.v["ts"] = now
+        # 2026-11-20：记下「这句话刚戳到身体」的墙钟时间。
+        # mood_pad 靠它判断该读「身体这本快账」还是跟「四激素那本慢账」平均 ——
+        # 少了这个戳，被骂之后【此刻】还写着「心情不错」。
+        self._vt_ts = now
         self._save_viscera()
         self._hist_viscera(res, now)
         return self.v
@@ -2148,9 +2280,21 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                               h.get("h_cort"), h.get("h_oxy"))
         if pad_body is None:
             return pad_h
-        p = round(max(-1.0, min(1.0, 0.5 * (pad_body["p"] + pad_h["p"]))), 3)
-        a = round(max(-1.0, min(1.0, 0.5 * (pad_body["a"] + pad_h["a"]))), 3)
-        d = round(max(-1.0, min(1.0, 0.5 * (pad_body["d"] + pad_h["d"]))), 3)
+        # 2026-11-20：刚被某句话戳到的时候（180 秒内），读身体那本快账，
+        # 不跟四激素那本慢账平均 —— 慢了半拍就会「被骂完还是好心情」。
+        _fresh = False
+        try:
+            _fresh = (time.time() - float(getattr(self, "_vt_ts", 0.0))) < 180.0
+        except Exception:
+            _fresh = False
+        if _fresh:
+            p = round(max(-1.0, min(1.0, float(pad_body["p"]))), 3)
+            a = round(max(-1.0, min(1.0, float(pad_body["a"]))), 3)
+            d = round(max(-1.0, min(1.0, float(pad_body["d"]))), 3)
+        else:
+            p = round(max(-1.0, min(1.0, 0.5 * (pad_body["p"] + pad_h["p"]))), 3)
+            a = round(max(-1.0, min(1.0, 0.5 * (pad_body["a"] + pad_h["a"]))), 3)
+            d = round(max(-1.0, min(1.0, 0.5 * (pad_body["d"] + pad_h["d"]))), 3)
         return {"p": p, "a": a, "d": d, "label": padlib.pad_label(p, a),
                 "src": {"mood": round(mood, 3),
                         "sero": pad_h["src"]["sero"], "dopa": pad_h["src"]["dopa"],
@@ -2171,19 +2315,30 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             _dt_h = max(0.0, _now - float(getattr(self, "_h_ts", _now))) / 3600.0
             if 0.0 < _dt_h <= 24.0 * 7:
                 _base = {k: hormone.H_BASE.get(k, 0.5) for k in hormone.H_KEYS}
-                self.h = hormone.regress_all(self.h, _dt_h, _base)
+                if getattr(self, "hf", None) is not None:
+                    self._hf_mods, _hf_ev = self.hf.tick(self.h, _dt_h)
+                    self.h = hf_mod.regulated_regress(self.h, _dt_h, self._hf_mods, _base)
+                    if _hf_ev:
+                        self._hf_events(_hf_ev)
+                else:
+                    self.h = hormone.regress_all(self.h, _dt_h, _base)
             self._h_ts = _now
         except Exception:
             pass
         kind, s = hormone.classify_event(text)
         before = dict(self.h)
         if kind is not None:
-            self.h = hormone.apply_event(self.h, kind, s)
+            _cand = hormone.apply_event(self.h, kind, s)
+            self.h = (hf_mod.apply_gain(self.h, _cand, self._hf_mods)
+                      if getattr(self, "hf", None) is not None else _cand)
         # 平时那些不咸不淡的话也要推一点点，否则日子过得再热闹，读数也不动
-        self.h = hormone.tone_nudge(self.h, text)
+        _cand = hormone.tone_nudge(self.h, text)
+        self.h = (hf_mod.apply_gain(self.h, _cand, self._hf_mods)
+                  if getattr(self, "hf", None) is not None else _cand)
         if kind is not None:
             # 记一下「刚才被什么戳到」——两小时内这句话还会挂在他嘴边
             self._last_event = (kind, time.time(), s)
+        self.h = hormone.soft(self.h)   # V9.8：所有注入都收进底色软带
         if self.h != before:
             self._save_hormones()
         return (kind, s)
@@ -2977,6 +3132,39 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         return {"n": len(items), "chars": chars, "min_turns": DREAM_MIN_TURNS,
                 "idle_hours": DREAM_IDLE_HOURS, "items": items}
 
+    def replay_outbox(self, limit=5, now=None):
+        """把写记忆时没做成的派生再试一遍（幂等，失败退避，超限进死信）。"""
+        import outbox as _ob
+        _ob.ensure(self.db)
+        rows = _ob.due(self.db, now=now, limit=limit)
+        out = []
+        for r in rows:
+            _ob.claim(self.db, r["id"], now=now)
+            kind = str(r["kind"] or "")
+            try:
+                mid = int(r["ref_id"] or 0)
+                if kind == "synapse_edges":
+                    row = self.db.execute("SELECT raw FROM mem WHERE id=?", (mid,)).fetchone()
+                    if not row:
+                        raise RuntimeError("mem_missing:%s" % mid)
+                    import cardmix_store as _ms
+                    from cardtext import embed_text_for as _etf
+                    _raw = str(row["raw"] or "")
+                    if not self.sem_ready():
+                        raise RuntimeError("sem_not_ready")
+                    _blob = self.semantic.encode(_etf(_raw, "user", _raw[:40]))
+                    self.synapse.add_semantic_edges([mid], [_blob])
+                else:
+                    raise RuntimeError("unknown_kind:%s" % kind)
+                _ob.done(self.db, r["id"], now=now)
+                out.append({"kind": kind, "ref": mid, "result": "ok"})
+            except Exception as e:
+                dead = _ob.fail(self.db, r["id"], "%s: %s" % (type(e).__name__, e), now=now)
+                out.append({"kind": kind, "ref": r["ref_id"],
+                            "result": "dead" if dead else "retry",
+                            "error": "%s: %s" % (type(e).__name__, e)})
+        return out
+
     def dream_due(self, now=None):
         """够不够格做一次梦：轮数够 or 空闲够久，且确实有待消化的原文。"""
         now = self.clock.now() if now is None else float(now)
@@ -3034,6 +3222,135 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                         "last_error": r["last_error"],
                         "age_h": round((time.time() - float(r["updated_ts"] or 0)) / 3600.0, 1)})
         return out
+
+    def _dream_regress_sample(self, limit=None):
+        """分层抽老记忆当回归样本：压完它们还得能在前 5 里找回来。
+
+        R6（2026-11-20）：原来只抽 3 条，代表性不足。改成分层：
+        先按 region 抽、再按 tier 抽、再按长度带抽，每层各 1 条，
+        凑够 n（默认 12，上限 20）后仍不够再随机补齐。
+        """
+        import re as _re
+        import os as _os
+        try:
+            want = int(limit) if limit else int(_os.environ.get("WHALE_DREAM_REG_N", "12") or 12)
+        except Exception:
+            want = 12
+        want = max(3, min(20, want))
+
+        picked = {}          # mid -> raw
+        tried = []           # 每层一条的 SQL
+
+        regions = ("episode", "chatter", "fact", "study", "preference", "self")
+        bands = (("14", "60"), ("60", "200"), ("200", "99999"))
+        for rg in regions:
+            tried.append(("region=%s" % rg,
+                          "SELECT id, raw FROM mem WHERE length(raw)>=14 AND dead=0"
+                          " AND region=? ORDER BY RANDOM() LIMIT ?", (rg, 2)))
+        for tier in ("mid", "core", "core_mut", "keep"):
+            tried.append(("tier=%s" % tier,
+                          "SELECT id, raw FROM mem WHERE length(raw)>=14 AND dead=0"
+                          " AND tier=? ORDER BY RANDOM() LIMIT ?", (tier, 1)))
+        for lo, hi in bands:
+            tried.append(("len %s-%s" % (lo, hi),
+                          "SELECT id, raw FROM mem WHERE dead=0 AND length(raw) BETWEEN ? AND ?"
+                          " ORDER BY RANDOM() LIMIT ?", (int(lo), int(hi), 2)))
+
+        for _round in range(3):
+            if len(picked) >= want:
+                break
+            for _name, sql, args in tried:
+                if len(picked) >= want:
+                    break
+                try:
+                    rows = self.db.execute(sql, args).fetchall()
+                except Exception:
+                    continue
+                for r in rows:
+                    if len(picked) >= want:
+                        break
+                    mid = int(r["id"])
+                    if mid in picked:
+                        continue
+                    picked[mid] = str(r["raw"] or "")
+
+        if len(picked) < want:
+            try:
+                rows = self.db.execute(
+                    "SELECT id, raw FROM mem WHERE length(raw)>=14 AND dead=0"
+                    " ORDER BY RANDOM() LIMIT ?", (want * 3,)).fetchall()
+                for r in rows:
+                    if len(picked) >= want:
+                        break
+                    picked.setdefault(int(r["id"]), str(r["raw"] or ""))
+            except Exception:
+                pass
+
+        out = []
+        for mid, raw in picked.items():
+            q = None
+            for tok in _re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{6,12}", raw):
+                if len(tok) >= 8:
+                    q = tok
+                    break
+            out.append((mid, q or raw[:12]))
+        return out
+
+
+    def _dream_regress_check(self, sample, top_k=5):
+        """返回（命中数，丢掉的样本）。"""
+        hit, lost = 0, []
+        for mid, q in sample:
+            try:
+                hits = self.recall(q, top_k=top_k, access=False)
+            except Exception:
+                hits = []
+            got = [int(h[2]["id"]) for h in hits] if hits else []
+            if int(mid) in got:
+                hit += 1
+            else:
+                lost.append((int(mid), q))
+        return hit, lost
+
+    def _dream_rollback(self, mids):
+        """把刚写的摘要撤干净：正文、出生证、分块、突触边。"""
+        ids = [int(m) for m in (mids or [])]
+        if not ids:
+            return 0
+        q = ",".join("?" for _ in ids)
+        # 2026-11-22（外部评审 B7）：原先只撤 mem/mem_birth/chunk，
+        # 这一批若建过 synapse 边，会留下指向已删记忆的悬空边（扩散时踩空）。
+        for sql, args in (
+                ("DELETE FROM mem WHERE id IN (%s)" % q, tuple(ids)),
+                ("DELETE FROM mem_birth WHERE mid IN (%s)" % q, tuple(ids)),
+                ("DELETE FROM chunk WHERE mem_id IN (%s)" % q, tuple(ids)),
+                ("DELETE FROM synapse WHERE a_id IN (%s)" % q, tuple(ids)),
+                ("DELETE FROM synapse WHERE b_id IN (%s)" % q, tuple(ids))):
+            try:
+                self.db.execute(sql, args)
+            except Exception:
+                pass
+        try:
+            self.db.commit()
+        except Exception:
+            pass
+        return len(ids)
+
+    def recent_topics(self, limit=3, days=4.0, now=None):
+        """最近聊到的几件事（话题层）。不参与召回、不参与衰减，只给上下文末尾一格。"""
+        try:
+            import topics as _tp2
+            return _tp2.recent(self.db, limit=limit, days=days, now=now)
+        except Exception:
+            return []
+
+    def topic_line(self, limit=3, days=4.0, now=None):
+        """给 prompt 用的一行；没有就返回空串（不占预算）。"""
+        try:
+            import topics as _tp3
+            return _tp3.render(self.db, limit=limit, days=days, now=now)
+        except Exception:
+            return ""
 
     def dream_commit(self, items, dialogue_ids=None, speaker="self", key=None, force=False):
         """五阶段提交：ingest → summarize → link → validate → commit。
@@ -3107,6 +3424,8 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         except Exception as e:
             soft_fail("dream_batch", e, "梦批次登记失败（仍继续写，只是丢了幂等）")
 
+        _reg_sample = self._dream_regress_sample()
+        _reg_base_hit = self._dream_regress_check(_reg_sample)[0] if _reg_sample else 0
         written = []
         try:
             # ---- summarize + link ----
@@ -3139,6 +3458,20 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     problems.append("lost_after_write:%s" % mid)
             written = keep
 
+            # ---- regress：压完不能让「本来想得起来的」想不起来 ----
+            # 为什么用老记忆当尺子：拿摘要自己造问句必然命中（自己和自己最像），
+            # 那种检查永远通过、等于没查。真风险是新增一堆摘要后把老条目从前 5 挤掉。
+            _chal = []
+            _chal_hit = _reg_base_hit
+            if _reg_sample and _reg_base_hit:
+                _after_hit, _lost = self._dream_regress_check(_reg_sample)
+                _chal_hit = _after_hit
+                if _after_hit < _reg_base_hit:
+                    _chal = [_q for _m, _q in _lost][:3]
+                    self._dream_rollback(written)
+                    raise RuntimeError("regress_failed:%d->%d %s"
+                                       % (_reg_base_hit, _after_hit, _chal))
+
             # ---- commit：翻原文标记 + 落批次账 ----
             if dialogue_ids is None:
                 self.db.execute("UPDATE dialogue SET dreamed=1 WHERE dreamed=0")
@@ -3150,11 +3483,33 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 "UPDATE dream_batch SET state='done', stage='commit', n_written=?,"
                 " written=?, updated_ts=? WHERE key=?",
                 (len(written), json.dumps(written), float(self.clock.now()), key))
+            # V10.7：批次也记下「这批对话发生在什么时候」
+            try:
+                _cts = 0.0
+                if ids:
+                    _q = ",".join("?" for _ in ids)
+                    _r = self.db.execute(
+                        "SELECT MAX(ts) FROM dialogue WHERE id IN (%s)" % _q,
+                        tuple(ids)).fetchone()
+                    _cts = float((_r[0] if _r else 0) or 0)
+                self.db.execute("UPDATE dream_batch SET conv_ts=? WHERE key=?",
+                                (_cts or float(self.clock.now()), key))
+                self.db.commit()
+            except Exception as _e:
+                soft_fail("dream_conv_ts_set", _e, "批次 conv_ts 写入失败")
+            # V10.7：话题层 —— 这批压出来的第一主题，记成「最近聊到」
+            try:
+                import topics as _tp1
+                _lab = (clean[0]["text"] if clean else "")[:16]
+                _tp1.touch(self.db, _lab, written, now=float(self.clock.now()))
+            except Exception as _e:
+                soft_fail("topics_touch", _e, "话题落批失败")
             self.db.commit()
             self._invalidate_idf()
             return {"ok": True, "key": key, "written": written, "n": len(written),
                     "n_written": len(written), "stage": "commit",
-                    "problems": problems, "dialogue_ids": ids}
+                    "problems": problems, "dialogue_ids": ids,
+                    "regress": {"sample": len(_reg_sample), "hit": _chal_hit}}
         except Exception as e:
             # ---- 死信：记下来，原文**不翻标记**（下次还能再压）----
             try:
@@ -3292,7 +3647,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             })
         return {"on": _REGION_LAMBDA_ON, "regions": out}
 
-    # ---------- 老 ----------
+
     def tick(self, dt_seconds, verbose=False):
         """时间流逝：结算权重 → 跨池流转 → 侵蚀 → 回收"""
         dt_raw = max(0.0, dt_seconds)
@@ -3306,6 +3661,14 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         n_settled = self._settle_recall_events()
         if n_settled:
             events.append((0, "settle_recall", n_settled))
+        # V9.2：夜间反思（内部按 fb_nightly_hours 节流，不节流也不重活）
+        try:
+            if self.feedback is not None:
+                _fb_out = self.feedback.nightly(now=now)
+                if _fb_out.get("ran"):
+                    events.append((0, "feedback_nightly", 1))
+        except Exception:
+            pass
         # 0.1) 清掉早就结算完的召回事件（只 settled 不删，表会一直涨：
         #      实测两天就 2226 行、其中 1763 行来自同一天）
         try:
@@ -3334,7 +3697,13 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         # 0.6) 激素回归（V5.0 T3-2）：四个激素往各自基线漂
         if dt_raw > 0:
             _hb = dict(self.h)
-            self.h = hormone.regress_all(self.h, dt_raw / 3600.0)
+            if getattr(self, "hf", None) is not None:
+                self._hf_mods, _hf_ev = self.hf.tick(self.h, dt_raw / 3600.0)
+                self.h = hf_mod.regulated_regress(self.h, dt_raw / 3600.0, self._hf_mods)
+                if _hf_ev:
+                    self._hf_events(_hf_ev)
+            else:
+                self.h = hormone.regress_all(self.h, dt_raw / 3600.0)
             if self.h != _hb:
                 self._save_hormones()
                 events.append((0, "hormone_drift", hormone.describe(self.h)))
@@ -3421,6 +3790,14 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         except Exception as _xe:
             print("[card2] 中期池出口失败: %s" % _xe)
 
+        # 1.26) 长期池里堆着的闲话下沉（V10.9）：只换池、不删正文。
+        try:
+            _ls = self.long_sink_stale(limit=30, now=now)
+            if _ls.get("moved"):
+                print("[card2] 长期池下沉：%d 条闲话挪进冷档" % _ls["moved"])
+        except Exception as _lse:
+            print("[card2] 长期池下沉失败: %s" % _lse)
+
         # 1.3) 中期小池：够格进长期，否则到期淡出
         for r in c.execute(
                 "SELECT * FROM mem WHERE pool=?", (POOL_MEDIUM_WARM,)).fetchall():
@@ -3480,6 +3857,9 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             # 削成空壳会让它连"我曾经讨厌香菜"都说不完整。
             if r["tier"] in CORE_TIERS:
                 continue
+            # P1-1（2026-11-20）：keep 档只允许被"改写/用户删"，不许被"久了没人提"削掉。
+            if r["tier"] == TIER_PROTECTED:
+                continue
             wn = wn_row(r, now)
             if wn >= ERASE_W_FLOOR:
                 continue
@@ -3507,6 +3887,57 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 # 最后一刀：整条消失（先登记台账，删了就算不出哈希了）
                 self._forget_row(c, r["id"], "主干侵蚀到头")
                 events.append((r["id"], "erased", None))
+
+        # 4b) 短暂档（P1-1）：到点就确定性降级，不留「半扇」空壳在热区。
+        for r in c.execute("SELECT * FROM mem WHERE tier=?", (TIER_EPHEMERAL,)).fetchall():
+            if r["pool"] in (POOL_LONG, POOL_ARCHIVE, POOL_DEEP):
+                continue
+            if (now - float(r["t_anchor"] or now)) < FLASH_TTL:
+                continue
+            c.execute("UPDATE mem SET erase_stage=2, verb='', obj='', w=?, t_anchor=?"
+                      " WHERE id=?", (HUSK_W, now, r["id"]))
+            events.append((r["id"], "flash_expired", round(HUSK_W, 4)))
+
+        # 4c) keep 配额（R8, 2026-11-20）
+        #     keep 是「永不自动忘」，但要是每条都标 keep，遗忘就名存实亡。
+        #     超配额时只降级不删除：tier keep -> mid，正文一字不动，台账记一笔。
+        try:
+            _keep_max = int(os.environ.get("WHALE_KEEP_MAX", "200") or 200)
+        except Exception:
+            _keep_max = 200
+        try:
+            _kn = c.execute("SELECT count(*) FROM mem WHERE tier=? AND dead=0",
+                            (TIER_PROTECTED,)).fetchone()[0]
+        except Exception:
+            _kn = 0
+        if _keep_max > 0 and _kn > _keep_max:
+            _over = _kn - _keep_max
+            rows = c.execute(
+                "SELECT id, w, pin, COALESCE(t_last_recall, t_anchor, 0) AS lr FROM mem"
+                " WHERE tier=? AND dead=0 ORDER BY w ASC, lr ASC, id ASC LIMIT ?",
+                (TIER_PROTECTED, _over * 2)).fetchall()
+            _demoted = 0
+            for r in rows:
+                if _demoted >= _over:
+                    break
+                _mid = int(r["id"])
+                _pinned = bool(r["pin"])
+                if _pinned:
+                    continue
+                c.execute("UPDATE mem SET tier=? WHERE id=? AND tier=?",
+                          (TIER_MID, _mid, TIER_PROTECTED))
+                _demoted += 1
+                events.append((_mid, "keep_demoted", round(float(r["w"] or 0), 4)))
+                try:
+                    import governance as _gv8
+                    _gv8.ensure(self.db)
+                    _gv8.decide(self.db, "mem", _mid, "update",
+                                reason="keep 超配额（%d > %d），降为 mid" % (_kn, _keep_max),
+                                source="retention_cap", exec_state="applied")
+                except Exception:
+                    pass
+            if _demoted:
+                events.append((0, "keep_cap", _demoted))
 
         # 5) 五空间下沉（T5-1 / V5.0 §12.5）
         #    长期 → 潜意识 → 深层痕迹 → TRACE 计数。
@@ -3612,6 +4043,134 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
     #   一次最多挪 20 条，且可以先只预览不落库（可回滚）。
     # 为什么不是直接删：硬盘够大，忘是检索行为不是删除行为（已归档那套同理）。
     # ============================================================
+    def contemplate(self, source, title, quote, about_world, about_self, tags=None, now=None):
+        """读一段东西，然后写下两段想法：关于世界、关于我自己。"""
+        import contemplate as _ct
+        return _ct.add(self, source, title, quote, about_world, about_self,
+                       tags=tags, now=now)
+
+    def identity_check(self):
+        """启动时核对六个身份锚字段（V10.8）。
+
+        为什么现在才接：identity.IdentityAnchor.verify_or_die() 早就写好了，
+        但全仓库没有一处调它 —— 也就是说 core_zone 里的锚字段被改掉，
+        除了 SQLite 触发器没人会知道，而触发器只挡 UPDATE、不挡「整库替换」。
+        这里只读比对，不修也不拒绝启动，结果进 {@link /health} 的启动自检。
+        """
+        try:
+            import identity as _idn
+            vals = {}
+            for k in _idn.CORE_KEYS:
+                v = self.identity.get_core(k)
+                if v is not None:
+                    vals[k] = v
+            ok, bad = self.identity.verify(vals)
+            return {"ok": bool(ok), "bad": list(bad or []), "n": len(vals)}
+        except Exception as _e:
+            soft_fail("identity_check", _e)
+            return {"ok": None, "bad": [], "err": "%s: %s" % (type(_e).__name__, _e)}
+
+    def thought_line(self, max_chars=60):
+        """最近在读/在想的一句话（来自思考层）。给我自己看，不是给他看。"""
+        if os.environ.get("WHALE_THOUGHT", "1") == "0":
+            return ""
+        try:
+            import contemplate as _ct
+            rows = _ct.recent(self, limit=8)
+        except Exception:
+            return ""
+        for r in rows or []:
+            if (r.get("flag") or "").strip():
+                continue
+            txt = (r.get("about_self") or "").strip()
+            if len(txt) < 12:
+                continue
+            if r.get("state") == "kept":
+                return txt[:max_chars]
+            if len(txt) >= 20:
+                return txt[:max_chars]
+        return ""
+
+    def thoughts(self, limit=10):
+        import contemplate as _ct
+        return _ct.recent(self, limit=limit)
+
+    def self_review_tick(self, now=None, force=False):
+        """周自省 + 自我模型刷新 + 治理状态镜像。返回做了什么。"""
+        import selfmodel as _sm
+        now = time.time() if now is None else float(now)
+        out = {"review": [], "model": [], "synced": 0}
+        try:
+            _sm.ensure(self.db)
+            out["review"] = _sm.weekly_review(self, now=now, force=force)
+            out["model"] = _sm.build_self_model(self, now=now)
+            out["synced"] = _sm.sync_state(self)
+            try:
+                import contemplate as _ct2
+                out["persona"] = _ct2.propose_from(self, now=now)
+                out["persona_on"] = _sm.persona_autonomy(self, now=now)
+            except Exception as exc:
+                print("[card2] 思考转可塑区失败：%s" % exc)
+                out["persona"] = []
+        except Exception as exc:
+            print("[card2] 自省失败：%s" % exc)
+            out["err"] = str(exc)[:200]
+        return out
+
+    def persona_lines(self, limit=None):
+        """可塑区：只有 active 的条目才进 prompt。尾行带一句「最近在想」。"""
+        out = []
+        try:
+            import selfmodel as _sm
+            out = list(_sm.persona_lines(self, limit=limit) or [])
+        except Exception as exc:
+            print("[card2] 可塑区读取失败：%s" % exc)
+        try:
+            _th = self.thought_line()
+        except Exception:
+            _th = ""
+        if _th:
+            out.append("最近在想：%s" % _th)
+        return out
+
+    def promote_frequent(self, need=None, limit=None, now=None):
+        """把「被想起来很多天」的中期记忆升到 keep（2026-11-21，E1 发现）。
+
+        背景：中期池按 LAM_M（半衰期 ~29.7 天）衰减，两个月就跌破 SHOW_HINT=0.15，
+        于是「三个月前说过的话」查不到 —— 除非它一直被想起。keep 档现在走长期池速率
+        （半衰期 ~371 天）并挡自动清理，配额 200 在 tick 的 4c 里裁。
+        口径：只升不删；只认 recall_days（分散在不同日子被想起），不认同日刷屏。
+        """
+        need = int(need if need is not None else os.environ.get("WHALE_KEEP_PROMOTE_DAYS", "3"))
+        limit = int(limit if limit is not None else os.environ.get("WHALE_KEEP_PROMOTE_MAX", "40"))
+        out = []
+        try:
+            c = self.db.cursor()
+            _rows = c.execute(
+                    "SELECT id, recall_days, w FROM mem "
+                    "WHERE tier=? AND dead=0 AND COALESCE(recall_days,0)>=? "
+                    "ORDER BY recall_days DESC, w DESC LIMIT ?",
+                    (TIER_MID, need, limit)).fetchall()
+            for r in _rows:
+                mid = r["id"]
+                c.execute("UPDATE mem SET tier=? WHERE id=? AND tier=?",
+                          (TIER_PROTECTED, mid, TIER_MID))
+                if c.rowcount:
+                    out.append((mid, int(r["recall_days"] or 0)))
+                    try:
+                        import governance as _gvp
+                        _gvp.decide(c, "mem", int(mid), "update",
+                                    reason="召回 %d 天，升 keep" % int(r["recall_days"] or 0),
+                                    source="keep_promote", exec_state="applied")
+                    except Exception:
+                        pass
+            self.db.commit()
+        except Exception as e:
+            print("[card2] keep 晋升失败：%s" % e)
+        if out:
+            print("[card2] keep 晋升 %d 条" % len(out))
+        return out
+
     def medium_exit_plan(self, horizon_days=0, now=None, limit=200):
         """算一遍：中期池里哪些在 horizon_days 内会跌破进门线。只读。"""
         now = float(now if now is not None else self.clock.now())
@@ -3625,10 +4184,15 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     continue
                 if w <= 0:
                     continue
+                # V10.9：已经跌破进门线的**不算**出口候选 —— 它们该按淡出/下沉走，
+                # 以前这里给 days_left=0 又把它们全选中，于是每跳 20 条闲话被保险进长期池。
                 if w <= THETA_MEDIUM:
-                    days_left = 0.0
-                else:
-                    days_left = math.log(w / THETA_MEDIUM) / LAM_M / 86400.0
+                    continue
+                # 闲话与短讯不保险：没被主动想起过的，就让它按自己的节奏淡出。
+                if (str(r["region"] or "") in ("chatter", "flash")
+                        and int(r["recall_days"] or 0) <= 0):
+                    continue
+                days_left = math.log(w / THETA_MEDIUM) / LAM_M / 86400.0
                 if days_left <= float(horizon_days):
                     out.append({"id": int(r["id"]), "w": round(w, 3),
                                 "days_left": round(days_left, 1),
@@ -3638,6 +4202,32 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         except Exception as e:
             print("[card2] 中期池出口测算失败: %s" % e)
             return []
+
+    def long_sink_stale(self, limit=30, now=None):
+        """长期池里「从没被想起过的闲话」往下沉一层（只换池不删，V10.9）。
+
+        为什么要有这一条：中期池出口曾经把 w<0.35 的一律保险进长期，
+        实测 813 条长期里有 462 条是闲话、429 条一次都没被想起过 ——
+        占着保险柜、还拖慢每次全量扫。这里按同样的可逆方式挪进冷档。
+        """
+        now = float(now if now is not None else self.clock.now())
+        moved = 0
+        try:
+            c = self.db.cursor()
+            rows = c.execute(
+                "SELECT id, w FROM mem WHERE pool=? AND region IN ('chatter','flash')"
+                " AND COALESCE(recall_days,0)<=0 AND COALESCE(w,0)<0.30"
+                " ORDER BY COALESCE(w,0) ASC LIMIT ?",
+                (POOL_LONG, max(1, int(limit)))).fetchall()
+            for r in rows:
+                c.execute("UPDATE mem SET pool=?, t_anchor=?, pool_in_ts=?"
+                          " WHERE id=?",
+                          (POOL_ARCHIVE, now, now, int(r["id"])))
+                moved += 1
+            self.db.commit()
+        except Exception as e:
+            print("[card2] 长期池下沉落库失败: %s" % e)
+        return {"moved": moved}
 
     def medium_exit_apply(self, horizon_days=0, limit=20, now=None, dry=False):
         """把算出来的前 limit 条挪进长期池。
@@ -3792,7 +4382,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 (POOL_LONG, budget)).fetchall()
             for r in rows:
                 # 底色层不下沉：它已经是最后一站了（改写在 supersede 里做）
-                if r["tier"] in CORE_TIERS:
+                if r["tier"] in CORE_TIERS or r["tier"] == TIER_PROTECTED:
                     continue
                 age = now - r["t_anchor"]
                 if age < AGE_EXIT_LONG:
@@ -4242,6 +4832,56 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             _tl.Timeline(self.db)
         except Exception:
             pass
+        try:
+            # 2026-11-21：周自省还依赖 learn_task —— 没跑过学习队列的新卡会 no such table
+            import learn as _ln
+            _ln.ensure(self.db)
+        except Exception as _le:
+            print("[card2] 学习队列表建失败: %s" % _le)
+        try:
+            # 2026-11-22 V10.7：话题层（最近聊到）。
+            import topics as _tp0
+            _tp0.ensure(self.db)
+        except Exception as _te:
+            print("[card2] 话题表建失败: %s" % _te)
+        try:
+            _cols = [r[1] for r in self.db.execute("PRAGMA table_info(dream_batch)")]
+            if "conv_ts" not in _cols:
+                self.db.execute("ALTER TABLE dream_batch ADD COLUMN conv_ts REAL NOT NULL DEFAULT 0")
+                self.db.commit()
+        except Exception as _ce:
+            print("[card2] dream_batch 补 conv_ts 失败: %s" % _ce)
+        try:
+            # 2026-11-20 V9.3：评价印象层（affect 表）。
+            import impression_eval as _aff
+            _aff.ensure(self.db)
+        except Exception as _ae:
+            print("[card2] 评价印象建表失败: %s" % _ae)
+        try:
+            import speech_policy as _sp3
+            _sp3.ensure(self.db)
+        except Exception:
+            pass
+        try:
+            # 2026-11-20 V9.7.2：治理判定台账（gov_decision）。
+            import governance as _gv
+            import outbox as _ob0
+            _gv.ensure(self.db)
+            _ob0.ensure(self.db)
+            # 2026-11-21 V9.9：学习回流层（distill）
+            import distill as _ds0
+            _ds0.ensure(self.db)
+            # 2026-11-20 V9.8.1：轮次生命周期（评审 R2）。
+            import turn as _tn
+            _tn.ensure(self.db)
+            # 2026-11-21 V10：周自省 / 自我模型 / 可塑区
+            import selfmodel as _sm0
+            _sm0.ensure(self.db)
+            # 2026-11-21 V10.2：思考层（contemplate）
+            import contemplate as _ct0
+            _ct0.ensure(self.db)
+        except Exception:
+            pass
 
     def inbox_pick(self, limit=40, hours=None, commit=False, min_score=None,
                    now=None):
@@ -4355,6 +4995,17 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         return {"ok": True, "mid": mid}
 
     def _forget_row(self, c, mid, reason):
+        # P1-1（2026-11-20）：keep 档不吃「自动忘记」这一刀。
+        # 只认久不访问/淡到看不见/小池到期这几类理由；用户删、合并照常。
+        try:
+            _r1 = c.execute('SELECT tier FROM mem WHERE id=?', (int(mid),)).fetchone()
+            if _r1 is not None:
+                _t1 = str(_r1[0] or '')
+                _auto = reason in ('短期小池到期，还是没被再想起', '中期小池到期，自然淡出', '主干侵蚀到头', '清晰度归零回收')
+                if _auto and (_t1 in CORE_TIERS or _t1 == TIER_PROTECTED):
+                    return False
+        except Exception:
+            pass
         """删一条记忆的**唯一出口**：先给它登记台账，再连细节一起删。
 
         以前四处各删各的（侵蚀、合并、沉淀、回收），删完就没了痕迹：
@@ -4412,14 +5063,16 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                  json.dumps(top or [], ensure_ascii=False),
                  json.dumps(picked or [], ensure_ascii=False),
                  int(n_lines or 0), int(ms or 0)))
-            c.commit()
+            self.db.commit()          # 2026-11-21：Cursor 没有 commit()，这里是 AttributeError
             rid = c.lastrowid
             # 只留最近 keep 条：这是排错用的窗口，不是账本
             c.execute("DELETE FROM recall_trace WHERE id <= ?",
                       (int(rid) - int(keep),))
-            c.commit()
+            self.db.commit()
             return rid
-        except Exception:
+        except Exception as _e:
+            # 以前这里直接 return None：整条漏斗静默失效，最需要它的时候恰好没有它
+            soft_fail("recall_trace", _e)
             return None
 
     def recall_trace_recent(self, n=10):
@@ -4736,7 +5389,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
     def set_tier(self, mid, tier, kind=None, subject_key=None,
                  valid_until=None):
         """把一条记忆搬到某一层。core_* 会被抬到 long 池并不再衰减。"""
-        if tier not in CORE_TIERS and tier not in (TIER_MID, TIER_SHORT):
+        if tier not in RETENTION_TIERS and tier not in (TIER_MID, TIER_SHORT):
             raise ValueError("不认识的层：%r" % (tier,))
         c = self.db.cursor()
         now = self.clock.now()
@@ -4968,7 +5621,41 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                             ("朋友", "friend"), ("认识", "known")):
                 if kw in txt:
                     return lay
+        # V10.7：core_tag 还没建过（新卡常见）→ 用「关于他的记忆」里最常标的层兜底。
+        try:
+            if uid:
+                r2 = c.execute(
+                    "SELECT about_layer, COUNT(*) AS n FROM mem"
+                    " WHERE about_uid=? AND COALESCE(about_layer,'')<>''"
+                    " GROUP BY about_layer ORDER BY n DESC LIMIT 1",
+                    (str(uid),)).fetchone()
+                if r2 and (r2["about_layer"] or "").strip():
+                    return str(r2["about_layer"]).strip()
+        except Exception:
+            pass
         return ""
+
+    def ensure_relation(self, uid="", name="", layer="friend"):
+        """有 uid 但还没有关系行时，补一条骨架行（幂等）。
+
+        为什么：`role_tag()` 原来只有手动入口，生产里没有任何调用，
+        于是 core_tag 一直是 0 行、`person_layer_of()` 永远走兜底分支 ——
+        典型的「新路径写好了、生产还在跑老路径」。这里只补一行，不做推断。
+        """
+        try:
+            uid = str(uid or "").strip()
+            if not uid:
+                return {"ok": False, "error": "no_uid"}
+            key = "role:%s#%s" % (name or "他", uid)
+            row = self.db.execute(
+                "SELECT 1 FROM mem WHERE tier=? AND subject_key=? LIMIT 1",
+                (TIER_CORE_TAG, key)).fetchone()
+            if row:
+                return {"ok": True, "created": False, "key": key}
+            self.role_tag(name or "他", "companion", layer=layer, uid=uid)
+            return {"ok": True, "created": True, "key": key}
+        except Exception as e:
+            return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
     def role_tag(self, person, role, layer="friend", note="", uid=""):
         """给一个人挂角色标签（core_tag）。标签不动，这条就不动。
@@ -5686,6 +6373,44 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 return out
         return None
 
+    def distill_learning(self, limit=10, now=None):
+        """学习回流：把结过账的学习结果变成技能，把复盘变成自我认知候选。
+
+        为什么要单独一层：learn_note 只写 study 记忆、review 只写 episode 记忆，
+        `skill` 表虽然有完整的 SM-2 衰减与检索，但没有任何路径往里写（2026-11-21
+        发现，又是一次「看起来在工作」）。这里只做分流，不生成新内容；
+        不碰身份锚，自我认知一律先记治理 pending。
+        """
+        out = {"skill": [], "insight": [], "err": ""}
+        try:
+            import distill as _ds
+        except Exception as exc:
+            out["err"] = "import:%s" % exc
+            return out
+        try:
+            _ds.ensure(self.db)
+            out["skill"] = _ds.book_learning(self, limit=int(limit), now=now)
+            out["insight"] = _ds.sweep_reviews(self, limit=max(1, int(limit) // 2), now=now)
+        except Exception as exc:
+            out["err"] = "%s" % exc
+        return out
+
+    def feedback_open(self, kind, mem_id, dialogue_id=None, note="",
+                      source="explicit", trust_ok=True):
+        """V9.0：给这一轮的可评价对象登记一条「待结算」。
+        没有反馈环（老卡/关掉）时安静返回 None，不打断主链路。"""
+        fb = getattr(self, "feedback", None)
+        if fb is None or not mem_id:
+            return None
+        try:
+            return fb.record(kind=kind, mem_id=int(mem_id),
+                             dialogue_id=dialogue_id, actor="self",
+                             note=str(note or "")[:200], source=source,
+                             trust_ok=trust_ok)
+        except Exception as e:
+            print("[card2] 反馈登记失败：%s" % e)
+            return None
+
     def apply_recall_effects(self, hits, query, touch=True):
         """把「被想起」这笔记账推迟到锁里补写（读写分离第 2 步）。
 
@@ -5710,6 +6435,13 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 self.synapse.reinforce([r["id"] for _s, _w, r in _sl])
             except Exception:
                 self._effects_err = True
+            # 2026-11-20：联想带出来的旧记忆 → 间接印象（打折、低频）。
+            try:
+                _aids = getattr(self, "_last_assoc_ids", None)
+                if _aids:
+                    self._impress_from_assoc(_aids)
+            except Exception:
+                self._effects_err = True
         except Exception:
             self._effects_err = True
 
@@ -5726,6 +6458,113 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             except Exception:
                 self._flush_err = True
         return len(_q)
+
+    def _union_rerank(self, query, q_clean, rows, scored):
+        """四通道候选并集 + 加权 RRF 重排（V9）。
+
+        通道：①整条记忆的纯语义相似度（scored 里已经算好的 sim，512 维）
+              ②分块向量（chunk_retriever，768 维）
+              ③字面 bigram（SQL LIKE 粗筛）
+              ④精确字面（问句里带数字/引号时按 6 字串捞）
+        RRF 只用名次 → 两代向量、两种分数尺度可以同池并排，不会互相污染。
+        """
+        import math as _m
+        if not scored:
+            return scored
+        k = _UNION_K
+        w_sem, w_chk, w_lex, w_exa = _UNION_W
+        rank_sets = {}
+
+        # ① 语义名次：真算 bge 余弦（不是 h[3]，那是 IDF 字面相似度）
+        rank_sets["sem"] = {}
+        try:
+            _qs = None
+            if self.sem_ready():
+                _qs = self.semantic.encode_query(q_clean or query or "")
+            if _qs is not None:
+                _embs = [self._emb_of(r) for r in rows]
+                _sims = semantic_mod.SemanticLayer.sims(_qs, _embs)
+                _order = sorted(range(len(rows)), key=lambda i: -_sims[i])[:400]
+                rank_sets["sem"] = {int(rows[i]["id"]): n for n, i in enumerate(_order)
+                                    if rows[i]["id"] is not None}
+            else:
+                _by = sorted(scored, key=lambda h: -(float(h[3]) if h[3] is not None else 0.0))
+                rank_sets["sem"] = {int(h[2]["id"]): i for i, h in enumerate(_by[:400])
+                                    if h[2]["id"] is not None}
+        except Exception:
+            self._union_err = True
+
+        # ② 分块名次
+        rank_sets["chunk"] = {}
+        try:
+            import chunk_retriever as _cr
+            _ids = _cr.search(str(self.db_path), query or q_clean,
+                              top_chunks=200, max_mems=300) or []
+            rank_sets["chunk"] = {int(i): n for n, i in enumerate(_ids[:300])}
+        except Exception:
+            self._union_err = True
+
+        # ③ 字面 bigram：取问句里最长的几个实词片段做 LIKE
+        rank_sets["lex"] = {}
+        try:
+            _keys = [x for x in sorted(set(_bigrams(q_clean or query or "")),
+                                       key=len, reverse=True) if len(x) >= 2][:4]
+            _seen = {}
+            for _kw in _keys:
+                _hit = self.db.execute(
+                    "SELECT id FROM mem WHERE raw LIKE ? AND COALESCE(dead,0)=0 "
+                    "AND COALESCE(quarantine,0)=0 LIMIT 120", ("%" + _kw + "%",)).fetchall()
+                for n, _r in enumerate(_hit):
+                    _seen.setdefault(int(_r[0]), n)
+            rank_sets["lex"] = _seen
+        except Exception:
+            pass
+
+        # ④ 精确字面：问句里有数字/引号才捞，捞不到就空着
+        rank_sets["exa"] = {}
+        try:
+            if re.search(r"[0-9０-９\"']", query or ""):
+                _core = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", q_clean or query or "")
+                if len(_core) >= 6:
+                    _frag = _core[:6]
+                    _hit = self.db.execute(
+                        "SELECT id FROM mem WHERE raw LIKE ? AND COALESCE(dead,0)=0 "
+                        "AND COALESCE(quarantine,0)=0 LIMIT 80", ("%" + _frag + "%",)).fetchall()
+                    rank_sets["exa"] = {int(r[0]): n for n, r in enumerate(_hit)}
+        except Exception:
+            pass
+
+        # 加权 RRF
+        rrf = {}
+        for name, w in (("sem", w_sem), ("chunk", w_chk), ("lex", w_lex), ("exa", w_exa)):
+            if w <= 0:
+                continue
+            for mid, rank in rank_sets[name].items():
+                rrf[mid] = rrf.get(mid, 0.0) + w / (k + rank)
+
+        # 原列表里可能还有并集没覆盖到的（比如时间窗里的小众条目），给个底噪名次
+        tail = 400
+        for h in scored:
+            mid = h[2]["id"]
+            if mid is not None and int(mid) not in rrf:
+                rrf[int(mid)] = (0.05 / (k + tail))
+                tail += 1
+
+        # 按 RRF 重排；同分保持原顺序（原顺序是融合分，作为平手裁决）
+        pos = {id(h): i for i, h in enumerate(scored)}
+        ordered = sorted(scored, key=lambda h: (-rrf.get(int(h[2]["id"]), 0.0) if h[2]["id"] is not None else 0,
+                                                pos[id(h)]))
+        # 下游（assemble_context）会按 score 再排一次，所以这里把
+        # 顺序「焊」进 score：单调递减、且远大于任何融合分的差异量级。
+        ordered = [(1.0 - 0.001 * _i, h[1], h[2], h[3], h[4])
+                   for _i, h in enumerate(ordered)]
+        try:
+            self._union_stats = {"channels": {n: len(v) for n, v in rank_sets.items()},
+                                 "hit": sum(1 for h in ordered[:13]
+                                            if h[2]["id"] is not None and int(h[2]["id"]) in rrf)}
+        except Exception:
+            pass
+        return ordered
 
     def recall(self, query, top_k=3, access=True, pools=None, regions=None,
                assoc=True, about_uid=None, trace=None):
@@ -6106,6 +6945,41 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             scored = _score_rows(rows, region_boost=False)
 
         scored.sort(key=lambda x: -x[0])
+        # V9.4：态度里的联想池 → 给这些记忆一点加成（触景忆旧事）。
+        # 只加一点点：它让「跟他/这件事有关」的旧事更容易浮上来，
+        # 但不该压过真正对得上的那条（0.03 量级，远小于一个名次的差）。
+        if os.environ.get("WHALE_AFFECT_LINK", "1") != "0":
+            try:
+                _ab = self._affect_link_boost(q_clean)
+            except Exception:
+                _ab = {}
+            if _ab:
+                _bd = []
+                for _h in scored:
+                    _mid = int(_h[2]["id"]) if _h[2]["id"] is not None else 0
+                    _add = _ab.get(_mid) or 0.0
+                    _bd.append((float(_h[0]) + _add,) + tuple(_h[1:]))
+                scored = _bd
+                # 不在候选里的联想记忆：以很低的分数补进来 —— 平时它们排不进前 13，
+                # 只在「没什么对得上的」时才浮上来（触景忆旧事，而不是硬塞）。
+                _have = {int(h[2]["id"]) for h in scored if h[2]["id"] is not None}
+                for _mid, _add in list(_ab.items())[:8]:
+                    if _mid in _have:
+                        continue
+                    try:
+                        _r2 = c.execute(_SEL + "WHERE m.id=? AND " + _LIVE, (_mid,)).fetchone()
+                    except Exception:
+                        _r2 = None
+                    if _r2:
+                        scored.append((float(_add) * 0.5, 0.35, _r2))
+                scored.sort(key=lambda x: -x[0])
+                if trace is not None:
+                    trace["affect_link"] = len(_ab)
+        if _UNION_ON:
+            try:
+                scored = self._union_rerank(query, q_clean, rows, scored)
+            except Exception:
+                self._union_err = True
         if trace is not None:
             trace.setdefault("stages", {})["scored"] = len(scored)
             # V7 第 8 件：只进内存 trace，不进 recall_trace 表。
@@ -6320,6 +7194,23 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         return len(pairs)
 
     # ---------- 召回事件（V5.0 公理 6）----------
+    def _hf_events(self, evs):
+        """记下激素负反馈的抑制/解除事件（时间线 + 总线，尽力而为）。"""
+        try:
+            self._hf_last_events = list(evs)[-8:]
+        except Exception:
+            pass
+        try:
+            fb = getattr(self, "feedback", None)
+            bus = fb._bus() if (fb is not None and hasattr(fb, "_bus")) else None
+            if bus is not None:
+                for ev in evs:
+                    bus.dispatch(ev.get("event"), payload=ev, ctx={},
+                                 source="hormone_feedback")
+        except Exception:
+            pass
+        return len(evs)
+
     def _write_recall_events(self, pairs, query=None, source="recall"):
         """pairs: [(mem_id, rank), ...]  只记事件，不动 mem 表"""
         if not pairs:
@@ -6414,6 +7305,12 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     " WHERE parent_id=?", (g * 0.8, ts, mid))
                 # 同步本地副本，让同一天的多次（跨天）累积正确
                 r = c.execute("SELECT * FROM mem WHERE id=?", (mid,)).fetchone()
+                # V9.2：学习笔记被想起 → learn_eval.times_used + 1（同日一次）
+                try:
+                    if self.feedback is not None:
+                        self.feedback.learn_eval_use(mid, now=ts)
+                except Exception:
+                    pass
         c.executemany("UPDATE recall_event SET settled=1 WHERE id=?",
                       [(i,) for i in settled_ids])
         self.db.commit()
@@ -6594,6 +7491,20 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             if h:
                 hint = hormone.style_hint(h)
         if hint:
+            # 2026-11-20：pad_style_hint 已经用「心情不错…」开头了，
+            #    再加一句「现在心情+…」就变成「现在心情心情不错」；
+            #    更糟的是心境字段（慢账）跟身体那句（快账）会互相打脸
+            #    （「心情不错」+「没什么劲、有点发怵」）。被戳到的 180 秒内只留一句。
+            _fresh = False
+            try:
+                _fresh = (time.time() - float(getattr(self, "_vt_ts", 0.0))) < 180.0
+            except Exception:
+                _fresh = False
+            if _fresh:
+                parts = [x for x in parts
+                         if not (x.startswith("现在心情") or x.startswith("心情"))]
+            elif parts and parts[0].startswith("现在心情") and "心情" in hint:
+                parts.pop(0)
             parts.append(hint)
         # 两小时内真被什么戳到过，就把它说出来 —— 比只念激素水平更像人
         ev = getattr(self, "_last_event", None)
@@ -6603,9 +7514,130 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 parts.append({"A": "刚才被暖了一下",
                               "B": "刚才那句还有点堵",
                               "C": "刚缓过来一点"}.get(ek, ""))
+        # V9.4：态度也进这句 —— 它是「对他」的分寸，不是心情，所以排在最后
+        try:
+            _tn = self._affect_tone()
+        except Exception:
+            _tn = ""
+        if _tn:
+            parts.append(_tn)
         if not parts:
             return ""
         return "（" + "，".join(parts) + "）"
+
+    # ---------- V9.4：态度 → 说话的分寸 ----------
+    def _affect_tone(self, uid=None):
+        """把「对他的态度」翻成一句使用说明（不是台词）。
+
+        safety 低 = 我还没把握他会不会突然冷下来 → 收着点、别乱开玩笑；
+        valence 高 = 跟他处得顺 → 敢闹、话可以多一点。
+        只读，不改状态；拿不到就返回 ""。
+        """
+        if os.environ.get("WHALE_AFFECT_TONE", "1") == "0":
+            return ""
+        try:
+            ar = self.affect_read("person", uid or self._affect_uid())
+        except Exception:
+            return ""
+        if not ar:
+            return ""
+        v = float(ar.get("valence") or 0.0)
+        sf = float(ar.get("safety") or 0.5)
+        n_pos = int(ar.get("n_pos") or 0)
+        n_neg = int(ar.get("n_neg") or 0)
+        if n_pos + n_neg < 1:
+            return ""
+        # 口径：三句话只把 valence 推动 ±0.02，光看 valence 这层永远不亮。
+        # 所以以「次数」为主判断方向，valence 只用来决定轻重。
+        _neg = (n_neg >= 2 and n_neg > n_pos) or v <= -0.10 or sf < 0.45
+        _pos = (n_pos >= 2 and n_pos > n_neg and sf >= 0.45) or (v >= 0.12 and sf >= 0.55)
+        if _neg and not _pos:
+            if v <= -0.12 or n_neg >= 4:
+                return "心里还有点介意，话说得短一点"
+            return "跟他说话要收着点，别乱开玩笑"
+        if _pos and not _neg:
+            if n_pos >= 4 or (v >= 0.12 and sf >= 0.55):
+                return "跟他处得顺，可以闹一点"
+            return "跟他说话不用太小心"
+        if sf >= 0.62 and n_neg == 0:
+            return "跟他说话不用太小心"
+        return ""
+
+    # ---------- V9.4：态度里的联想池 → 召回加成 ----------
+    def _affect_link_boost(self, q_clean=""):
+        """读出「跟这个人/这件事绑在一起的记忆」，召回时给它们一点权重。
+
+        这是说明书里预留的第 3 条（linked_mems 预热召回）：不是替她决定想什么，
+        而是让跟她有关系的旧事在候选里更靠前一点。WHALE_AFFECT_LINK=0 可关。
+        """
+        if os.environ.get("WHALE_AFFECT_LINK", "1") == "0":
+            return {}
+        try:
+            ids = self.affect_linked(self._affect_uid(), limit=32)
+        except Exception:
+            return {}
+        out = {}
+        for i, mid in enumerate(ids):
+            out[int(mid)] = 0.030 / (1.0 + 0.08 * i)
+        return out
+
+    # ---------- V9.4：意向 → 行动 ----------
+    def act_on_intentions(self, now=None, limit=3):
+        """把「想做但还没做」的意向真做掉，做不掉就留着。
+
+        只做便宜、可回滚、不需要模型的三件：
+          learn_more / explore → 排一条学习任务（真去学）
+          self_check            → 做一次自查（收过期反馈 + 事实对账）
+          replay                → 记进工作台（提醒自己下次说）
+        避免场景（avoid_scene）什么都不做 —— 它的作用只是让语气收着点。
+        """
+        fb = getattr(self, "feedback", None)
+        if not fb:
+            return {"ok": False, "why": "no_feedback"}
+        now = float(now or time.time())
+        done = []
+        _its = fb.active_intentions(limit=24)
+        # 便宜的先做：自查、记一笔不花时间；学习要排队，排在后面
+        _its.sort(key=lambda x: (0 if str(x.get("kind")) in ("self_check", "replay") else 1,
+                                 -float(x.get("urge") or 0.0)))
+        for it in _its:
+            if len(done) >= limit:
+                break
+            kind = str(it.get("kind") or "")
+            urge = float(it.get("urge") or 0.0)
+            # 便宜的事（自查、记一笔）门槛低一点；要花时间的（学习）才等它更急
+            _need = 0.08 if kind in ("self_check", "replay") else 0.15
+            if urge < _need:
+                continue
+            mid = it.get("mem_id")
+            try:
+                if kind in ("learn_more", "explore") and hasattr(self, "learn_enqueue"):
+                    topic = ""
+                    if mid:
+                        row = self.db.execute("SELECT raw FROM mem WHERE id=?", (int(mid),)).fetchone()
+                        topic = str(row[0] or "")[:40] if row else ""
+                    if topic:
+                        r = self.learn_enqueue(topic, why="意向：" + kind, source="intention", prio=min(0.9, 0.45 + urge * 0.5))
+                        if r:
+                            done.append(("learn", kind, topic))
+                            fb.consume_intention(it["id"], note="已排学习")
+                elif kind == "self_check":
+                    fb.reconcile_facts(now=now)
+                    fb.drop_stale(now=now)
+                    done.append(("self_check", kind, "过期反馈/事实对账"))
+                    fb.consume_intention(it["id"], note="已自查")
+                elif kind == "replay":
+                    done.append(("replay", kind, str(mid or "")))
+                    fb.consume_intention(it["id"], note="记进工作台")
+            except Exception as ex:
+                done.append(("err", kind, str(ex)[:60]))
+        if done and hasattr(self, "worklog_add"):
+            try:
+                self.worklog_add("意向行动：" + "；".join("%s(%s)" % (a, c) for a, _b, c in done),
+                                 kind="note", by="self")
+            except Exception:
+                pass
+        return {"ok": True, "done": done}
 
     def core_identity_text(self):
         """把 CORE 区那几条拼成一段给上下文用的人格锚。
@@ -6785,6 +7817,49 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             recent_lines=recent_lines,
             db=self.db)
         q = plan["budget"]
+        # 2026-11-20：本轮真实总预算（控制台 BUDGET 可调，现 13500）。
+        #   末尾的让位闸必须用它，不能用写死的 TOKEN_BUDGET，否则线上永远「超预算」。
+        _total_cap = int(plan.get("total") or budget or TOKEN_BUDGET or 0)
+        # 2026-11-20（用户 m07166）：重要格做「独立外挂」，不计入四格、也不受总预算挤占。
+        #   排序规则、表达策略这类「不给人设加戏、但每轮都该在」的格子走这里。
+        #   调法：runtime_config 里 EXTRA_CHARS，或 env WHALE_EXTRA_CHARS；设 0 退回旧行为。
+        try:
+            _extra_cap = int(os.environ.get("WHALE_EXTRA_CHARS", "") or 0)
+        except Exception:
+            _extra_cap = 0
+        if not _extra_cap:
+            try:
+                _extra_cap = int(self._meta_get("EXTRA_CHARS", 1200) or 1200)
+            except Exception:
+                _extra_cap = 1200
+        _extra_cap = max(0, min(4000, int(_extra_cap)))
+        _extra_used = 0
+        # ---- 证据段硬配额（实验臂，2026-11-19）----------------------------
+        # 默认 0.35（2026-11-19 实测：417 题有证据轮 139/305=45.6% → 144/305=47.2%；
+        # 真卡 23 条尺子不变 62.5/75/100；0.45 反而回落到 46.8%，所以停在 0.35）。
+        # WHALE_EVID_QUOTA=0 关掉，回到按场景权重分。
+        # 差额只从「人格 / 长期」两格里挪，且各自留底线（10% / 5%），
+        # 近上下文（recent）与状态不动 —— 那两格是「此刻」的锚，动了她会接不上话。
+        try:
+            _eq = float(os.environ.get("WHALE_EVID_QUOTA", "0.35") or 0)
+        except Exception:
+            _eq = 0.0
+        if _eq > 0:
+            _tot = int(plan.get("total") or sum(int(v or 0) for v in q.values()))
+            _need = int(_eq * _tot)
+            _cur = int(q.get("recall") or 0)
+            if _need > _cur and _tot > 0:
+                _add_left = _need - _cur
+                for _k, _floor in (("identity", 0.10), ("longterm", 0.05)):
+                    if _add_left <= 0:
+                        break
+                    _low = int(_tot * _floor)
+                    _avail = max(0, int(q.get(_k) or 0) - _low)
+                    _mv = min(_avail, _add_left)
+                    if _mv > 0:
+                        q[_k] = int(q.get(_k) or 0) - _mv
+                        _add_left -= _mv
+                q["recall"] = _cur + (_need - _cur - _add_left)
         self.turn_count = (turns or 0) + 1
         self.last_talk_ts = now
 
@@ -6813,10 +7888,41 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         #    现在顺序是 稳 → 稳 → 变 → 变 → 变：前两格是缓存的地基，
         #    真正会动的都在尾巴上，命中就只从尾巴开始断。
         if identity:
-            blk = "【我是谁】\n" + take(identity, q["identity"])
+            # 2026-11-20：人格整段给，不再按 q["identity"] 截断。
+            #    他明确要求「组装时人格必须完整加载」——截人格等于每轮都在
+            #    「记得自己是谁」和「省 token」之间赌一把。WHALE_IDENTITY_FULL=0 回退。
+            if os.environ.get("WHALE_IDENTITY_FULL", "1") == "1":
+                blk = "【我是谁】\n" + identity
+            else:
+                blk = "【我是谁】\n" + take(identity, q["identity"])
             out.append(blk)
             sections["identity"] = len(blk)
-        used = 0
+        # V9.5：表达策略层（SYNAPSE-1024 Speech Policy V1.0）
+        #    稳定的「怎么说话」放人格之后、长期印象之前 —— 它是缓存地基的一部分，
+        #    每轮不刷新；每轮变的分流标签走【此刻】尾巴，不能混进来。
+        # V9.6：表达策略层换成方案 §6.2 —— 独立配额，不挤占四格。
+        #     超长时仍由末尾的统一让位兜底（人格与证据优先）。
+        if os.environ.get("WHALE_SPEECH", "1") != "0":
+            try:
+                _plines = self.speech_policy_lines()
+            except Exception:
+                _plines = []
+            if _plines:
+                _blk = "【说话方式】\n" + "\n".join(_plines)
+                out.append(_blk)
+                sections["speech_policy"] = len(_blk)
+                self._speech_blk = _blk
+        # V10.1 可塑区：他允许我改的那部分自己（只有 active 的进 prompt）
+        if os.environ.get("WHALE_PERSONA", "1") != "0":
+            try:
+                _pers = self.persona_lines()
+            except Exception:
+                _pers = []
+            if _pers:
+                _ptxt = "【我现在的样子（可改）】\n" + "\n".join(_pers)
+                out.append(_ptxt)
+                sections["persona"] = len(_ptxt)
+        used = 0   # 策略格走独立配额（BLOCK_MAX_CHARS），这里从 0 起算
 
         # ② 长期印象格：长期池里「值得一直记得」的几条
         #    🔧 V4.1：不能只按权重排 —— 权重高的常是又长又啰嗦的随口话。
@@ -7184,6 +8290,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 print("   %.3f id=%s %s" % (float(_h[0]) or 0.0, dict(_h[2]).get("id"),
                                             (dict(_h[2]).get("raw") or "")[:40]))
 
+        _seen_dd = []      # 已经占过格子的原文（去重用）
         for s, wn, r in fresh:
             # 🔧 T4-4：联想来的条目加个前缀，跟直接想起区分开。
             #    直接命中最多 5 条，联想最多再补 2 条，别把格子塞满。
@@ -7205,6 +8312,16 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 n_assoc += 1
                 body = "（顺带想起）" + self.render(r, wn, query=query)
             else:
+                # 去重：这条是不是跟前面某条几乎一个意思？（jaccard 大于阈值就跳过）
+                if _DEDUP_ON:
+                    try:
+                        _rd = (r["raw"] or "").strip()
+                    except Exception:
+                        _rd = ""
+                    if _rd:
+                        if any(jaccard(_rd, _x) >= _DEDUP_TH for _x in _seen_dd):
+                            continue
+                        _seen_dd.append(_rd)
                 n_direct += 1
                 if n_direct > _max_lines:
                     break
@@ -7405,7 +8522,9 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         #    后者是熟练度 —— 会做的东西不该跟着记忆一起褪色。
         #    而且技能带步骤，混进印象格里会把那格撑爆。
         used = 0
-        cap5 = used + q["recall"]
+        # 2026-11-20：技能不占「四格预算」—— 会做的事是熟练度，不该因为
+        # 这一轮记忆格配额小就被截掉。给它独立的字数上限（WHALE_SKILL_CHARS）。
+        cap5 = used + max(200, int(os.environ.get("WHALE_SKILL_CHARS", "700") or 700))
         try:
             _skv = to_vec(query or "")
             _sk_hits = (self.skill.search(_skv, top_k=3,
@@ -7437,6 +8556,96 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         #    人格 + 长期两格就变成稳定的前缀，缓存能从第一格一直命到
         #    「想起」之前 —— 只有尾巴要重算。
         #    这句话本身很短（二三十字），重算它几乎不花钱。
+        # ⑤.4 独立部件：联想（顺带想起的）与学过的（region=study 的笔记）
+        #     2026-11-20 用户口径：「联想和回想起来的事应当作为组装时独立的部件，
+        #     需要调用 skill 或者学到的知识应当独立完整的加上去且不占用比例」。
+        #     所以这两格**不吃** q["recall"] 的额度，各自只有字数上限；
+        #     WHALE_SOLO=0 可以整体关掉。
+        if os.environ.get("WHALE_SOLO", "1") == "1":
+            _solo_cap = max(200, int(os.environ.get("WHALE_SOLO_CHARS", "900") or 900))
+            _shown = set(int(x) for x in (_picked_ids or []))
+            # ① 联想：recall 时突触顺带点亮的那些条，单独成格
+            try:
+                _al = [int(x) for x in (getattr(self, "_last_assoc_ids", set()) or set())
+                       if int(x) not in _shown][:6]
+            except Exception:
+                _al = []
+            if _al:
+                _alines = []
+                _au = 0
+                try:
+                    _ph = ",".join("?" * len(_al))
+                    for _r in self.db.execute(
+                            "SELECT id, raw, create_ts FROM mem WHERE id IN (%s)" % _ph, _al):
+                        _txt = _brief_line(_r["raw"], 110)
+                        if not _txt:
+                            continue
+                        if _au + len(_txt) > _solo_cap // 2:
+                            break
+                        _alines.append("- " + _txt)
+                        _au += len(_txt)
+                except Exception:
+                    _alines = []
+                if _alines:
+                    _ablk = "【联想】\n" + "\n".join(_alines)
+                    out.append(_ablk)
+                    sections["assoc"] = len(_ablk)
+            # ② 学过的：她真学过的东西（region=study），整段给，不按比例砍
+            try:
+                _st = self.recall(query, top_k=6, access=False, regions=["study"]) if query else []
+            except Exception:
+                _st = []
+            _slines = []
+            _su = 0
+            for _h in _st:
+                _mid = int(_h[2]["id"] or 0)
+                if _mid in _shown:
+                    continue
+                try:
+                    if str(_h[2]["region"] or "") != "study":
+                        continue
+                except Exception:
+                    continue
+                try:
+                    _raw2 = _h[2]["raw"]
+                except Exception:
+                    _raw2 = ""
+                _t = _brief_line(_raw2 or "", 160)
+                if not _t:
+                    continue
+                if _su + len(_t) > _solo_cap // 2:
+                    break
+                _slines.append("- " + _t)
+                _su += len(_t)
+            if _slines:
+                _sblk = "【学过的】\n" + "\n".join(_slines)
+                out.append(_sblk)
+                sections["study"] = len(_sblk)
+
+        # ⑤.4b 联想的另一半：跟他/这件事绑在一起的旧事（态度里的联想池）。
+        #     只在真有绑定、且没被前面的证据格提到时出现 —— 它是「触景」，
+        #     不是主证据，所以不占证据预算。
+        try:
+            if os.environ.get("WHALE_AFFECT_LINK", "1") != "0":
+                _lids = list(self.affect_linked(self._affect_uid(), limit=4))[:4]
+                _used = set(int(h[2]["id"]) for h in hits if h[2]["id"] is not None)
+                _ll = []
+                for _m in _lids:
+                    if int(_m) in _used:
+                        continue
+                    _r3 = self.db.execute("SELECT raw FROM mem WHERE id=?", (int(_m),)).fetchone()
+                    if not _r3 or not _r3[0]:
+                        continue
+                    _ll.append("- " + _brief_line(_r3[0], 80))
+                    if len(_ll) >= 2:
+                        break
+                if _ll:
+                    _lt = "\n".join(_ll)
+                    out.append("【关联想起】\n" + _lt)
+                    sections["assoc_link"] = len(_lt)
+        except Exception:
+            pass
+
         # ⑤.5 身体（快反应层）：一句话就能动的那一层。
         #     放在【此刻】前面 —— 生理反应比情绪先来，顺序本身也是信息。
         try:
@@ -7452,13 +8661,34 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         #     只描述、不预测、不当台词：这里进来的每一句都必须是"发生过 N 次的事"，
         #     而不是"他大概会怎样"。
         try:
-            _ilines = self.impression_hints(limit=3)
+            # 2026-11-20：印象作为独立组装件 —— 自己的触发、按这句话选。
+            #    WHALE_IMPRESSION=0 整个关掉；选择器空/词面不重合时退回权重序。
+            if os.environ.get("WHALE_IMPRESSION", "1") == "0":
+                _ilines = []
+            elif hasattr(self, "impression_hints_for"):
+                _ilines = self.impression_hints_for(query or "", limit=3)
+                if not _ilines:
+                    _ilines = self.impression_hints(limit=3)
+            else:
+                _ilines = self.impression_hints(limit=3)
         except Exception:
             _ilines = []
         if _ilines:
             _itxt = "\n".join("- " + x for x in _ilines)
             out.append("【印象】\n" + _itxt)
             sections["impression"] = len(_itxt)
+
+        # ⑤.6b 态度（V9.3 评价印象）：我对这个人 / 这种场景是什么感觉。
+        #      只写主观感受，不预测行为、不当台词；WHALE_AFFECT=0 可关。
+        try:
+            if os.environ.get("WHALE_AFFECT", "1") != "0" and hasattr(self, "affect_hints"):
+                _alines = self.affect_hints(query or "", limit=3)
+                if _alines:
+                    _atxt = "\n".join("- " + x for x in _alines)
+                    out.append("【态度】\n" + _atxt)
+                    sections["affect"] = len(_atxt)
+        except Exception:
+            pass
 
         # ⑤.7 动机：此刻最想做的一两件事（欲望层）
         #     mot_state 里有七条驱力，candidates 会把超出基线的浮成「想做的事」。
@@ -7480,11 +8710,40 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     "sent_today": 0, "learned_today": 0,
                 })
                 if _cands:
-                    _top = _cands[0]
-                    _mtxt = motiv.describe(_top)
-                    if _mtxt:
-                        out.append("【动机】\n" + _mtxt)
+                    # 2026-11-20：欲望单独一格，列全部浮出基线的（最多 3 条），
+                    #    不吃四格预算 —— 它是「我这会儿想干什么」，不是记忆。
+                    _mlines = []
+                    for _c in _cands[:3]:
+                        _t = motiv.describe(_c)
+                        if _t and _t not in _mlines:
+                            _mlines.append("- " + _t)
+                    if _mlines:
+                        _mtxt = "\n".join(_mlines)
+                        out.append("【欲望】\n" + _mtxt)
                         sections["motiv"] = len(_mtxt)
+                    # 【期待】独立成格：认知层那本「预期」账（RPE 的另一半）
+                    try:
+                        _lk = self._emotion()
+                        _ex = {}
+                        if _lk is not None:
+                            _ex = dict(getattr(getattr(_lk, "eng", None), "expect", {}) or {})
+                        _nm = {"praise": "夸我一句", "comfort": "安慰我", "flirt": "跟我亲近",
+                               "apology": "跟我道歉", "reject": "拒绝我", "neglect": "冷落我",
+                               "tired": "说累", "jealous": "吃醋", "generic": "平常地聊"}
+                        _pk = sorted(_ex.items(), key=lambda kv: -float(kv[1]))[:2]
+                        _el = []
+                        for _k, _v in _pk:
+                            _v = float(_v)
+                            _w = "我大概预期你会%s" % _nm.get(_k, _k)
+                            if _v < 0.55:
+                                _w = "说不好你接下来会怎么着（近来的偏向：%s）" % _nm.get(_k, _k)
+                            _el.append("- " + _w + "（%.2f）" % _v)
+                        if _el:
+                            _etxt = "\n".join(_el)
+                            out.append("【期待】\n" + _etxt)
+                            sections["expect"] = len(_etxt)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -7547,7 +8806,67 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             out.append("【此刻】\n" + state)
             sections["state"] = len(state)
 
+        # V9.6：本轮倾向（方案 §6.3）—— 分流标签 + 称谓距离；当下状态，尾巴单独成格，
+        #       不进稳定策略格（稳定格每轮一字不差才好吃缓存）。
+        if os.environ.get("WHALE_SPEECH", "1") != "0" and os.environ.get("WHALE_SPEECH_MODE", "1") != "0":
+            _val = None
+            try:
+                _aff = self.affect_read("person", self._affect_uid())
+                if _aff:
+                    _val = float(_aff.get("valence") or 0.0)
+            except Exception:
+                _val = None
+            try:
+                _rh = self.speech_round_hint(query, scene=plan.get("scene"), pad=self.mood_pad(),
+                                             oxy=getattr(self, "oxy", None), valence=_val)
+            except Exception:
+                _rh = {"lines": []}
+            _rtxt = "\n".join("- " + _x for _x in (_rh.get("lines") or []))
+            if _rtxt:
+                _blk2 = "【这一轮】\n" + _rtxt
+                out.append(_blk2)
+                sections["round_hint"] = len(_rtxt)
+                self._round_blk = _blk2
+
+        # V10.7：最近聊到（话题层）。它是「锚」，不是证据 —— 预算紧时第一个让位。
+        try:
+            _tl = self.topic_line(limit=3, days=4.0)
+            if _tl:
+                out.append("【最近聊到】\n" + _tl)
+                sections["topics"] = len(_tl)
+        except Exception:
+            pass
         text = "\n\n".join(out)
+        # V9.6：预算真爆了按「有多可惜」从低到高让位，不再一上来就砍【说话方式】。
+        #   2026-11-20 修：线上 prompt 平时就 6800~7000 字（人格整段 + 近上下文），
+        #   旧实现第一刀砍策略格，导致这一层每一轮都被砍掉，等于白上。
+        #   顺序：工作台 → 旧账 → 联想 → 事实/期待/欲望 → 时间 → 本轮倾向 → 策略格。
+        #   人格、长期、证据、此刻，永不在让位名单里。
+        _EVICT = (
+            ("【最近聊到】", "topics"),
+            ("【最近在做的事】", "worklog"),
+            ("【很久以前的事（翻旧账翻到的）】", "archive"),
+            ("【关联想起】", "assoc_link"),
+            ("【期待】", "expect"),
+            ("【事实】", "fact"),
+            ("【欲望】", "motiv"),
+            # 【这一轮】【说话方式】是外挂格（_extra_cap），永不进让位名单。
+        )
+        try:
+            _extra_used = len(getattr(self, "_speech_blk", "") or "") + len(getattr(self, "_round_blk", "") or "")
+            if _extra_used:
+                sections["extra_chars"] = _extra_used
+        except Exception:
+            pass
+        _lim = int(_total_cap) + int(_extra_cap)
+        if len(text) > _lim:
+            for _head, _skey in _EVICT:
+                if len(text) <= _lim:
+                    break
+                _kept = [b for b in out if not b.startswith(_head)]
+                if len(_kept) != len(out):
+                    text = "\n\n".join(_kept)
+                    sections.pop(_skey, None)
         return {
             "text": text,
             "sections": sections,
@@ -7578,6 +8897,14 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             self.db.commit()
         except Exception:
             pass
+        # 承诺账本那条连接（2026-11-19）：不关的话 Windows 下文件句柄不放。
+        _pmc = getattr(self, "_pm_conn", None)
+        if _pmc is not None:
+            try:
+                _pmc.close()
+            except Exception:
+                pass
+            self._pm_conn = None
         try:
             self.db.close()
         except Exception:

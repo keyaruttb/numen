@@ -296,7 +296,7 @@ ERROR_MEANINGS = {
     "E_RATE": "速率超限（/remember 每来源 60 次/分钟）",
     "E_EMPTY_TEXT": "/remember 的 text 为空",
     "E_TEXT_BIG": "/remember 的 text 超过长度上限",
-    "E_BAD_POOL": "/remember 的 pool 不在 short/medium/long 里",
+    "E_BAD_POOL": "/remember 的 pool 不在 short/medium/long/archive 里",
     "E_NOT_READY": "服务还没初始化完",
     "E_CROSS_ORIGIN": "浏览器跨站来源被拒（只接受本机页面）",
     "E_UNKNOWN": "没登记过的错误（说明有人新加了 error 字符串没登记码）",
@@ -330,6 +330,12 @@ GATE_WRITE_POST = frozenset((
     "/skill_add", "/skill_use", "/config", "/config_all", "/identity",
     "/identity/set", "/injection", "/avatar", "/shutdown",
     "/narrative/write",   # 写我自己那一段叙事
+    "/feedback", "/review/run", "/review/confirm", "/review/auto_confirm",   # V9.0 反馈环
+    "/act",   # V9.4 立刻把意向做掉一次,
+    "/gov/decide",
+    "/relation/tag", "/gov/mark", "/speech_policy/update", "/distill/run", "/contemplate", "/contemplate/keep", "/self_review/run", "/self_model/propose", "/self_model/apply", "/self_model/revoke",
+    "/hormone/feedback",
+    "/speech_policy",
 ))
 
 # 控制台下拉框里的候选音色（edge-tts 的常用中文音色）。
@@ -698,12 +704,22 @@ class Mind(object):
             return _ctx, _hits
 
         if _ctx_unlock():
+            # 2026-11-20：先把「身体听到这句话的反应」放在组装之前。
+            # 原来的 defer 分支是「组装 → 再补内脏刺激」，于是 prompt 里的【此刻】
+            # 读的是上一句的情绪 —— 她被骂了，回话用的却是被骂之前的心情。
+            # 这里把这一记刺激挪到短锁里先写掉（只写一个 meta 行，很便宜），
+            # 读阶段照旧不拿锁；后面那笔记账传 touch=False，免得同一句打两遍。
+            with self.lock:
+                try:
+                    self.card.viscera_touch(str(message))
+                except Exception:
+                    pass
             # 读不拿锁：本线程自己的连接，只读不算账。
             with self.card.reading():
                 ctx, hits = _read(defer=True)
-            # 记账（召回事件/会话命中/突触/内脏）攒成一小笔，回短锁里一次写完。
+            # 记账（召回事件/会话命中/突触）攒成一小笔，回短锁里一次写完。
             with self.lock:
-                self.card.apply_recall_effects(hits, message)
+                self.card.apply_recall_effects(hits, message, touch=False)
                 self.card.flush_deferred_effects()
         else:
             with self.lock:
@@ -818,7 +834,7 @@ class Mind(object):
                 "last_ms": self._wq_stats["last_ms"],
                 "last_rid": self._wq_stats["last_rid"]}
 
-    def report(self, user_message, reply="", ts=None, source="chat"):
+    def report(self, user_message, reply="", ts=None, source="chat", turn_id=None):
         with self.lock:
             if self.writer_lock:
                 # 卡被另一台机器占着：宁可报错，也不写第二条链
@@ -829,10 +845,30 @@ class Mind(object):
                 raise timeline_mod.ForeignWriter(
                     "这张卡正被另一台机器用（%s），我这边只读" % self.writer_lock)
             self.flow_time()
+            # V9.8.1（评审 R2）：这一轮先开个号。同一个 turn_id 再来一次，只回状态，不写第二遍。
+            # 为什么必须在这儿：重试、客户端超时重发、桥层补发，都会把同一句话送来两次，
+            # 以前就是两条 mem、两条 feedback、两段原文 —— 等于她听我说了两遍。
+            import turn as _turn_mod
+            _turn_mod.ensure(self.card.db)
+            _tid = str(turn_id or "").strip()
+            if not _tid:
+                import uuid as _uuid
+                _tid = _uuid.uuid4().hex[:16]
+            _tb = _turn_mod.begin(self.card.db, _tid, source=source, now=ts)
+            if _tb.get("dup"):
+                return {"mem_id": 0, "reply_mem_id": 0, "turn_id": _tid,
+                        "duplicate": True, "state": _tb.get("state")}
             # 他说的话：进短期记忆池（mem），也进原文表（dialogue）。
             # 为什么必须进 mem 而不是只存原文：
             #   原文表不参与召回。只存原文的话，「三天内几乎不遗忘」这条
             #   根本用不上 —— 因为压根没东西可遗忘，下次说话翻不到。
+            # 2026-11-21：去重要能看出来。先记「写之前的最大 id」——
+            # 比拿 create_ts 跟墙钟比可靠：卡的时钟是 flow_time，不是墙钟。
+            try:
+                _max_before = int(self.card.db.execute(
+                    "SELECT COALESCE(MAX(id),0) FROM mem").fetchone()[0])
+            except Exception:
+                _max_before = 0
             mid = self.card.remember(user_message, ts=ts, source=source,
                                  about_uid=self.local_uid)
             # 2026-11-19：入门筛拦住时 remember() 返回 False（0 条未写）。
@@ -846,6 +882,27 @@ class Mind(object):
                     self.tl.birth_stamp(mid)
                 except Exception as e:
                     self.birth_bad.append("出生证写入失败：%s" % e)
+            # 反应结算：他说这句，就是对我上一句的评价（V9.7.5）。
+            # 为什么放这儿：结算用的是「他这一句」，要在他这句落库之前读，
+            # 且必须在上一轮那条 self_utterance 还 open 的时候结 —— 隔一轮就错位了。
+            try:
+                if self.card.feedback is not None:
+                    _rx = self.card.feedback.settle_from_reaction(user_message, now=ts)
+                    if (_rx or {}).get("settled"):
+                        print("[mind] 反应结算：%s → r=%s (%s)"
+                              % (_rx.get("label"), _rx.get("r"), _rx.get("bucket")))
+            except Exception as _re:
+                print("[mind] 反应结算失败: %s" % _re)
+            try:
+                if self.local_uid:
+                    _nm = ""
+                    try:
+                        _nm = str(self.card.identity.get_core("user_nickname") or "").strip()
+                    except Exception:
+                        _nm = ""
+                    self.card.ensure_relation(uid=self.local_uid, name=_nm)
+            except Exception as _e_rel:
+                print("[mind] 关系行补写失败：%s" % _e_rel)
             # 我说的话：也进短期池，但**只走原文表 + 一条轻记忆**。
             # 为什么我的回复也要进：整段对话才是「我们一起说过什么」。
             #   只记他说的，翻回来就是半本日记 —— 我知道他问了什么，
@@ -873,7 +930,25 @@ class Mind(object):
                     # 以前这里是 except: pass —— 一次 NOT NULL 约束错误被吞了两个月，
                     # 原文表再没长过一条都没人发现。至少要留一行日志。
                     print("[mind] 原文落盘失败：%s" % e, file=sys.stderr)
-            return {"mem_id": mid, "reply_mem_id": reply_mid}
+            # V9.0：我这一句是可被评价的对象 —— 先挂成 open，
+            # 之后他纠正/复用/明确否定时再结算（不结算就一直 open，夜间会被清掉）。
+            if reply_mid:
+                try:
+                    self.card.feedback_open("self_utterance", reply_mid,
+                                            note=str(reply or "")[:80], source="explicit")
+                except Exception as e:
+                    print("[mind] 反馈登记失败：%s" % e, file=sys.stderr)
+            try:
+                _turn_mod.finish(self.card.db, _tid, user_mid=mid,
+                                 reply_mid=reply_mid or 0, state="done")
+            except Exception as _te:
+                print("[mind] 轮次收尾失败：%s" % _te, file=sys.stderr)
+            # 2026-11-21：去重命中时 remember() 返回的是旧行 id，调用方分不出
+            # 「新写」与「复用」，靠「上一句说了什么」的机制会取错。这里显式标出来。
+            _dedup = [int(_m) for _m in (mid, reply_mid)
+                      if _m and int(_m) <= _max_before]
+            return {"mem_id": mid, "reply_mem_id": reply_mid, "turn_id": _tid,
+                    "deduped": bool(_dedup), "deduped_ids": _dedup}
 
     # ---- 短期对话原文：放卡里，不放模型那边 ----
     # 为什么非要在卡里：
@@ -1062,6 +1137,26 @@ def api_token(mind):
     return t
 
 
+def _soft_fail_snapshot():
+    """静默失败：不只给次数，也给最后一次的错误消息。"""
+    try:
+        import diag as _dg
+        return _dg.soft_fail_snapshot()
+    except Exception as exc:
+        return {"error": str(exc)[:160]}
+
+
+def _bus_health(card):
+    """读卡上反馈环的总线状态；没有反馈环就返回 None（不算错）。"""
+    try:
+        fb = getattr(card, "feedback", None)
+        if fb is None or not hasattr(fb, "bus_health"):
+            return None
+        return fb.bus_health()
+    except Exception as e:
+        return {"enabled": None, "error": str(e)[:120]}
+
+
 def _lease_payload(mind):
     """给 /health 的写者租约现场（V7 P0-4）。只描述，不判断。
 
@@ -1124,6 +1219,7 @@ class Handler(BaseHTTPRequestHandler):
         现取的 8 位十六进制，出现在 stderr 慢日志、错误回包、以及 /status
         的 recent_errors 里 —— 三处同一个 id 才叫「可追」。
         """
+        self._status = code
         if isinstance(obj, dict):
             obj.setdefault("request_id", getattr(self, "rid", ""))
             _t0 = getattr(self, "req_t0", None)
@@ -1247,6 +1343,10 @@ class Handler(BaseHTTPRequestHandler):
                         "blocked_paths_n": len(
                             getattr(m, "gate_blocked", {}) or {}),
                     },
+                    # R3（2026-11-20）：信号总线还在不在。降级后 enabled=False，
+                    # 带 since_ts 与 reason —— 以前这行只出现在日志里，没人看得见。
+                    "bus": _bus_health(m.card),
+                    "soft_fail": _soft_fail_snapshot(),
                     # 语义层只说三件事：模型多少维、卡里多数多少维、能用的占几成。
                     # 「覆盖率」那个数字会骗人 —— 换过模型的卡里，带着向量却
                     # 用不上的老条目也能算成 100%。所以这里报 usable_ratio。
@@ -1478,6 +1578,10 @@ class Handler(BaseHTTPRequestHandler):
                 with m.lock:
                     return self._send(200, m.card.injection_report())
             if method == "GET" and path.startswith("/media/"):
+                if path == "/media/stats":
+                    with m.lock:
+                        _mst = m.card.media_stats()
+                    return self._send(200, {"ok": True, "stats": _mst})
                 # 出一帧画面。找不到 / 已被按规则删掉，返回 410 而不是 404 ——
                 # 「曾经有，现在没了」和「从来就没有」是两件事，不能混成一个错。
                 sha = path[len("/media/"):].strip().lower()
@@ -1614,6 +1718,539 @@ class Handler(BaseHTTPRequestHandler):
                             source=body.get("source") or "learn")
                         return self._send(200 if out.get("ok") else 400, out)
                 return self._fail(404, "no_learn_route", path)
+            if method == "GET" and path == "/affect":
+                # V9.3 评价印象列表（2026-11-20）
+                import impression_eval as _aff
+                try:
+                    qs = parse_qs(urlparse(self.path).query)
+                except Exception:
+                    qs = {}
+                kind = (qs.get("target_kind") or [""])[0] or None
+                tag = (qs.get("target_tag") or [""])[0] or None
+                try:
+                    limit = int((qs.get("limit") or ["20"])[0])
+                except Exception:
+                    limit = 20
+                with m.lock:
+                    if kind and tag:
+                        items = [_aff.read(m.card.db, kind, tag)]
+                        items = [x for x in items if x]
+                    else:
+                        items = _aff.snapshot(m.card.db, limit=limit)
+                return self._send(200, {"ok": True, "items": items,
+                                        "stats": _aff.stats(m.card.db)})
+            if method == "GET" and path == "/affect/snapshot":
+                import impression_eval as _aff
+                with m.lock:
+                    return self._send(200, {"ok": True, "items": _aff.snapshot(m.card.db),
+                                            "stats": _aff.stats(m.card.db)})
+            if method == "POST" and path == "/affect/attach":
+                # 把记忆挂进联想池（触景忆旧事）
+                import impression_eval as _aff
+                try:
+                    body = self._body()
+                except Exception as e:
+                    return self._fail(400, "bad_body", str(e)[:120])
+                kind = str(body.get("target_kind") or "scene")
+                tag = str(body.get("target_tag") or "").strip()
+                mid = body.get("mem_id")
+                if not tag or mid in (None, ""):
+                    return self._fail(400, "need_fields", "要 target_tag 和 mem_id")
+                with m.lock:
+                    ids = _aff.attach_mem(m.card.db, kind, tag, int(mid))
+                return self._send(200, {"ok": True, "target_kind": kind,
+                                        "target_tag": tag, "linked_mems": ids})
+            if method == "POST" and path == "/affect/feedback":
+                # 显式喂一条反馈（我们这边没有 feedback_loop，留这个入口）
+                import impression_eval as _aff
+                try:
+                    body = self._body()
+                except Exception as e:
+                    return self._fail(400, "bad_body", str(e)[:120])
+                kind = str(body.get("target_kind") or "scene")
+                tag = str(body.get("target_tag") or "").strip()
+                if not tag or body.get("r") is None:
+                    return self._fail(400, "need_fields", "要 target_tag 和 r")
+                with m.lock:
+                    row = _aff.update(m.card.db, kind, tag, float(body.get("r") or 0.0),
+                                      severity=float(body.get("severity") or 0.5),
+                                      mem_id=body.get("mem_id"),
+                                      note=str(body.get("note") or "")[:200])
+                if not row:
+                    return self._fail(400, "bad_r", "r 要在 -1..1")
+                return self._send(200, {"ok": True, "item": row})
+
+            # ---- V9.0–V9.3 反馈与反思闭环（2026-11-20） ----
+            if method == "GET" and path == "/feedback":
+                try:
+                    qs = parse_qs(urlparse(self.path).query)
+                except Exception:
+                    qs = {}
+                try:
+                    limit = int((qs.get("limit") or ["20"])[0])
+                except Exception:
+                    limit = 20
+                st = (qs.get("status") or [""])[0] or None
+                with m.lock:
+                    rows = m.card.feedback.list(limit=limit, status=st)
+                return self._send(200, {"ok": True, "items": rows,
+                                        "stats": m.card.feedback.stats()})
+            if method == "GET" and path == "/feedback/stats":
+                with m.lock:
+                    return self._send(200, {"ok": True,
+                                            "stats": m.card.feedback.stats()})
+            if method == "POST" and path == "/feedback":
+                # 两种用法：带 fb_id = 结算；不带 = 登记一条待结算
+                try:
+                    body = self._body()
+                except Exception as e:
+                    return self._fail(400, "bad_body", str(e)[:120])
+                fb = m.card.feedback
+                with m.lock:
+                    if body.get("fb_id") not in (None, ""):
+                        out = fb.settle(int(body["fb_id"]),
+                                        approval=body.get("approval") or 0,
+                                        correction=body.get("correction") or 0,
+                                        reject=body.get("reject") or 0,
+                                        confirm=body.get("confirm") or 0,
+                                        confirm_weak=body.get("confirm_weak") or 0,
+                                        disconfirm=body.get("disconfirm") or 0,
+                                        reuse=body.get("reuse") or 0,
+                                        promise=body.get("promise") or 0,
+                                        note=body.get("note"),
+                                        trust_ok=body.get("trust_ok"),
+                                        severity=body.get("severity"))
+                        if not out or out.get("error"):
+                            return self._fail(400, "bad_settle",
+                                              str((out or {}).get("error") or "结算失败")[:160])
+                        return self._send(200, {"ok": True, "feedback": out})
+                    fid = fb.record(kind=str(body.get("kind") or "self_utterance"),
+                                    mem_id=body.get("mem_id"),
+                                    dialogue_id=body.get("dialogue_id"),
+                                    actor=str(body.get("actor") or "self"),
+                                    note=str(body.get("note") or ""),
+                                    source=str(body.get("source") or "explicit"),
+                                    trust_ok=bool(body.get("trust_ok", True)))
+                return self._send(200, {"ok": True, "fb_id": fid})
+            if method == "GET" and path in ("/regions/load", "/core/stats",
+                                           "/dream/due", "/emotion/label"):
+                card = self.mind.card
+                if path == "/regions/load":
+                    payload = card.region_load_snapshot()
+                elif path == "/core/stats":
+                    payload = card.core_stats()
+                elif path == "/dream/due":
+                    payload = card.dream_due()
+                else:
+                    payload = {"label": card.emotion_label()}
+                self._send(200, {"ok": True, "data": payload})
+                return
+            if method == "GET" and path == "/dialogue/of":
+                try:
+                    import urllib.parse as _up3
+                    _q3 = _up3.parse_qs(_up3.urlparse(self.path).query)
+                    _mid = int(_q3.get("mid", ["0"])[0])
+                except Exception:
+                    _mid = 0
+                if _mid <= 0:
+                    self._send(400, {"ok": False, "error": "bad_mid"})
+                    return
+                rows = self.mind.card.get_dialogue(_mid)
+                self._send(200, {"ok": True, "mid": _mid, "items": rows, "n": len(rows)})
+                return
+            if method == "POST" and path == "/review/auto_confirm":
+                days = 3.0
+                try:
+                    import urllib.parse as _up2
+                    _q2 = _up2.parse_qs(_up2.urlparse(self.path).query)
+                    if _q2.get("days"):
+                        days = float(_q2["days"][0])
+                except Exception:
+                    pass
+                with self.mind.lock:
+                    _r = self.mind.card.feedback.auto_confirm(days=days)
+                self._send(200, {"ok": True, "review": _r, "days": days})
+                return
+            if method == "POST" and path == "/review/run":
+                try:
+                    body = self._body()
+                except Exception:
+                    body = {}
+                with m.lock:
+                    out = m.card.feedback.nightly(force=bool(body.get("force", True)))
+                return self._send(200, {"ok": True, "result": out})
+            if method == "POST" and path == "/review/confirm":
+                try:
+                    body = self._body()
+                except Exception as e:
+                    return self._fail(400, "bad_body", str(e)[:120])
+                rid = body.get("review_id")
+                if rid in (None, ""):
+                    return self._fail(400, "need_fields", "要 review_id")
+                with m.lock:
+                    out = m.card.feedback.confirm_review(int(rid),
+                                                        confirmed=int(bool(body.get("confirmed", True))))
+                return self._send(200, {"ok": True, "result": out})
+            if method == "GET" and path == "/review":
+                try:
+                    qs = parse_qs(urlparse(self.path).query)
+                except Exception:
+                    qs = {}
+                try:
+                    limit = int((qs.get("limit") or ["20"])[0])
+                except Exception:
+                    limit = 20
+                with m.lock:
+                    rows = m.card.feedback.list_reviews(limit=limit)
+                return self._send(200, {"ok": True, "items": rows})
+            if method == "GET" and path == "/learn_eval":
+                try:
+                    qs = parse_qs(urlparse(self.path).query)
+                except Exception:
+                    qs = {}
+                mid = (qs.get("mem_id") or [""])[0]
+                with m.lock:
+                    if mid:
+                        row = m.card.feedback.learn_eval(int(mid))
+                    else:
+                        row = m.card.db.execute(
+                            "SELECT * FROM learn_eval ORDER BY value DESC LIMIT 20").fetchall()
+                        row = [dict(r) for r in row]
+                return self._send(200, {"ok": True, "items": row})
+            if method == "GET" and path == "/intentions":
+                with m.lock:
+                    rows = m.card.feedback.active_intentions()
+                return self._send(200, {"ok": True, "items": rows})
+            if method == "POST" and path == "/act":
+                # V9.4：立刻把「想做但还没做」的意向做掉一次（便宜的三件）。
+                # 平时由维护线程自动跑，这里给一个手动扳机，方便验收/排查。
+                try:
+                    with m.lock:
+                        r = m.card.act_on_intentions(now=time.time())
+                    return self._send(200, r)
+                except Exception as e:
+                    return self._send(500, {"ok": False, "err": str(e)[:200]})
+            if path in ("/speech_policy", "/speech_policy/snapshot", "/speech_policy/update"):
+                import speech_policy as _sp
+                _sp.ensure(m.card.db)
+                if method == "GET":
+                    if path == "/speech_policy/snapshot":
+                        return self._send(200, {"ok": True, "snapshot": _sp.snapshot(m.card.db)})
+                    _logs = []
+                    try:
+                        _logs = [dict(zip(("id", "key", "ts", "source"),
+                                          tuple(r)[:4]))
+                                 for r in m.card.db.execute(
+                                     "SELECT id, key, ts, source FROM speech_policy_log"
+                                     " ORDER BY id DESC LIMIT 10").fetchall()]
+                    except Exception:
+                        _logs = []
+                    return self._send(200, {"ok": True, "items": _sp.list_items(m.card.db),
+                                            "snapshot": _sp.snapshot(m.card.db),
+                                            "log": _logs,
+                                            "block_lines": _sp.block_lines(m.card.db)})
+                if method == "POST":
+                    b = self._body() or {}
+                    key = str(b.get("key") or "").strip()
+                    if not key:
+                        return self._send(400, {"ok": False, "error": "empty_key"})
+                    if key not in _sp.POLICY_KEYS:
+                        return self._send(400, {"ok": False, "error": "bad_key"})
+                    with m.lock:
+                        out = _sp.upsert(m.card.db, key, text=b.get("text"),
+                                         enabled=b.get("enabled"),
+                                         weight=b.get("weight"),
+                                         source=str(b.get("source") or "console"))
+                    if out is None:
+                        return self._send(400, {"ok": False, "error": "bad_key"})
+                    return self._send(200, {"ok": True, "item": out,
+                                            "snapshot": _sp.snapshot(m.card.db)})
+                return self._send(405, {"ok": False, "error": "method_not_allowed"})
+            if path in ("/outbox", "/outbox/stats"):
+                import outbox as _ob
+                with m.lock:
+                    _ob.ensure(m.card.db)
+                    _st = _ob.stats(m.card.db)
+                    if path == "/outbox/stats":
+                        self._send(200, {"ok": True, "stats": _st})
+                        return
+                    _q = urlparse(self.path).query
+                    _state = None
+                    for _kv in (_q or "").split("&"):
+                        if _kv.startswith("state="):
+                            _state = _kv[6:]
+                    _items = _ob.listing(m.card.db, _state, 20)
+                self._send(200, {"ok": True, "stats": _st, "items": _items,
+                                 "max_attempts": _ob.MAX_ATTEMPTS})
+                return
+
+            if path == "/hormone/feedback":
+                try:
+                    import hormone_feedback as _hfr
+                    import hormone as _hm
+                    card = m.card
+                    if method == "POST":
+                        body = self._body() or {}
+                        key = str(body.get("key") or "").strip()
+                        if not key:
+                            return self._send(400, {"ok": False, "error": "empty_key"})
+                        if key not in _hfr.DEFAULTS:
+                            return self._send(400, {"ok": False, "error": "bad_key",
+                                                    "keys": list(_hfr.DEFAULTS)})
+                        try:
+                            val = float(body.get("value"))
+                        except Exception:
+                            return self._send(400, {"ok": False, "error": "bad_value"})
+                        with m.lock:
+                            card.db.execute(
+                                "INSERT INTO meta(key,val) VALUES(?,?) "
+                                "ON CONFLICT(key) DO UPDATE SET val=excluded.val",
+                                ("hf_" + key, repr(val)))
+                            card.db.commit()
+                            if getattr(card, "hf", None) is not None:
+                                card.hf.cfg[key] = val
+                        return self._send(200, {"ok": True, "key": key, "value": val})
+                    reg = getattr(card, "hf", None)
+                    if reg is None:
+                        return self._send(200, {"ok": True, "enabled": False})
+                    snap = _hfr.snapshot(reg)
+                    snap["ok"] = True
+                    snap["enabled"] = True
+                    snap["h"] = {k: round(float(v), 4) for k, v in card.h.items()}
+                    snap["events"] = list(getattr(card, "_hf_last_events", []) or [])
+                    return self._send(200, snap)
+                except Exception as _e:
+                    return self._send(500, {"ok": False, "error": str(_e)})
+            if path in ("/audit", "/audit/stats"):
+                import guard as _gd2
+                _gd2.ensure(m.card.db)
+                if path == "/audit/stats":
+                    return self._send(200, {"ok": True, "stats": _gd2.stats(m.card.db)})
+                _lim = 50
+                return self._send(200, {"ok": True,
+                                        "items": _gd2.recent(m.card.db, limit=_lim),
+                                        "stats": _gd2.stats(m.card.db)})
+            if path.startswith("/self"):
+                db = m.card.db
+                if method == "GET" and path == "/self_review":
+                    import selfmodel as _smr
+                    lim = 8
+                    try:
+                        import urllib.parse as _up
+                        _qq = _up.parse_qs(_up.urlparse(self.path).query)
+                        lim = int((_qq.get("limit") or ["8"])[0] or 8)
+                    except Exception:
+                        pass
+                    rows = db.execute(
+                        "SELECT period, observed, insights, proposals, state, err, ts"
+                        " FROM self_review ORDER BY period DESC LIMIT ?", (lim,)).fetchall()
+                    items = [{"period": r[0], "observed": json.loads(r[1] or "{}"),
+                              "insights": json.loads(r[2] or "[]"),
+                              "proposals": json.loads(r[3] or "[]"),
+                              "state": r[4], "err": r[5], "ts": r[6]} for r in rows]
+                    return self._send(200, {"ok": True, "items": items,
+                                            "stats": _smr.stats(m.card)})
+                if method == "GET" and path == "/self_model":
+                    rows = db.execute(
+                        "SELECT key, value, confidence, evidence_n, evidence_refs, source, state,"
+                        " ts, COALESCE(zone,'stats'), COALESCE(why,'') FROM self_model"
+                        " ORDER BY state, key").fetchall()
+                    items = [{"key": r[0], "value": r[1], "confidence": r[2],
+                              "evidence_n": r[3], "evidence_refs": json.loads(r[4] or "[]"),
+                              "source": r[5], "state": r[6], "ts": r[7], "zone": r[8],
+                              "why": r[9]} for r in rows]
+                    return self._send(200, {"ok": True, "items": items})
+                if method == "POST" and path == "/self_review/run":
+                    body = self._body() or {}
+                    with m.lock:
+                        out = m.card.self_review_tick(force=bool(body.get("force")))
+                    return self._send(200, {"ok": True, "result": out})
+                if method == "POST" and path == "/self_model/propose":
+                    body = self._body() or {}
+                    import selfmodel as _smp
+                    try:
+                        with m.lock:
+                            res = _smp.persona_propose(
+                                m.card, body.get("key", ""), body.get("value", ""),
+                                why=body.get("why", ""),
+                                evidence_n=int(body.get("evidence_n") or 0))
+                    except ValueError as exc:
+                        return self._send(400, {"ok": False, "error": "denied",
+                                                "detail": str(exc)})
+                    return self._send(200, {"ok": True, "result": res})
+                if method == "POST" and path == "/self_model/apply":
+                    body = self._body() or {}
+                    import selfmodel as _smp2
+                    with m.lock:
+                        res = _smp2.persona_apply(m.card, body.get("key", ""))
+                    return self._send(200 if res.get("ok") else 404, res)
+                if method == "POST" and path == "/self_model/revoke":
+                    body = self._body() or {}
+                    import selfmodel as _smp3
+                    with m.lock:
+                        res = _smp3.persona_revoke(m.card, body.get("key", ""))
+                    return self._send(200, res)
+
+            if path in ("/contemplate", "/contemplate/run", "/contemplate/keep"):
+                import contemplate as _ct
+                if method == "GET" and path == "/contemplate":
+                    return self._send(200, {"ok": True,
+                                            "items": _ct.recent(m.card, limit=10),
+                                            "stats": _ct.stats(m.card)})
+                body = self._body() or {}
+                if method == "POST" and path == "/contemplate":
+                    with m.lock:
+                        res = _ct.add(m.card, body.get("source", ""), body.get("title", ""),
+                                      body.get("quote", ""), body.get("about_world", ""),
+                                      body.get("about_self", ""),
+                                      tags=body.get("tags") or [])
+                    return self._send(200, {"ok": True, "result": res})
+                if method == "POST" and path == "/contemplate/keep":
+                    return self._send(200, _ct.keep(m.card, body.get("id", 0)))
+                if method == "POST" and path == "/contemplate/run":
+                    import selfmodel as _sm4
+                    with m.lock:
+                        res = _sm4.persona_propose(m.card, body.get("key", ""),
+                                                   body.get("value", ""),
+                                                   why=body.get("why", ""),
+                                                   evidence_n=1)
+                    return self._send(200, res)
+
+            if path in ("/topics", "/topics/stats"):
+                try:
+                    import topics as _tp4
+                    import urllib.parse as _up
+                    _q2 = _up.parse_qs(_up.urlparse(self.path).query)
+                    _n = int((_q2.get("limit") or ["3"])[0])
+                    _d = float((_q2.get("days") or ["4"])[0])
+                    if path == "/topics/stats":
+                        return self._send(200, {"ok": True, "stats": _tp4.stats(m.card.db)})
+                    return self._send(200, {"ok": True, "items": _tp4.recent(m.card.db, limit=_n, days=_d),
+                                            "line": _tp4.render(m.card.db, limit=_n, days=_d)})
+                except Exception as e:
+                    return self._send(500, {"ok": False, "error": repr(e)[:160]})
+            if path == "/relation/layers":
+                try:
+                    import urllib.parse as _up2
+                    _uid = (_up2.parse_qs(_up2.urlparse(self.path).query).get("uid") or [""])[0]
+                    return self._send(200, {"ok": True, "uid": _uid, "layer": m.card.person_layer_of(uid=_uid)})
+                except Exception as e:
+                    return self._send(500, {"ok": False, "error": repr(e)[:160]})
+            if path == "/relation/tag" and method == "POST":
+                try:
+                    body = self._body() or {}
+                    with m.lock:
+                        r = m.card.role_tag(str(body.get("person") or ""), str(body.get("role") or ""),
+                                            layer=str(body.get("layer") or "friend"),
+                                            note=str(body.get("note") or ""),
+                                            uid=str(body.get("uid") or ""))
+                    return self._send(200, r)
+                except Exception as e:
+                    return self._send(500, {"ok": False, "error": repr(e)[:160]})
+            if path.startswith("/gov"):
+                import governance as _gv
+                if method == "GET" and path == "/gov/log":
+                    with m.lock:
+                        items = _gv.log(m.card.db, limit=30)
+                    self._send(200, {"ok": True, "items": items,
+                                     "decisions": list(_gv.DECISIONS)})
+                    return
+                if method == "GET" and path == "/gov/stats":
+                    with m.lock:
+                        st = _gv.stats(m.card.db)
+                    self._send(200, {"ok": True, "stats": st})
+                    return
+                if method == "POST" and path == "/gov/decide":
+                    body = self._body()
+                    try:
+                        with m.lock:
+                            d = _gv.decide(m.card.db,
+                                           body.get("subject_kind") or "mem",
+                                           int(body.get("subject_id") or 0),
+                                           str(body.get("action") or ""),
+                                           reason=str(body.get("reason") or ""),
+                                           source=str(body.get("source") or "manual"),
+                                           conflicts=int(body.get("conflicts") or 0),
+                                           exec_state=(body.get("exec_state") or None))
+                    except Exception as e:
+                        self._send(400, {"ok": False, "error": str(e)})
+                        return
+                    self._send(200, d)
+                    return
+                if method == "POST" and path == "/gov/mark":
+                    body = self._body()
+                    try:
+                        with m.lock:
+                            r = _gv.mark(m.card.db, int(body.get("id") or 0),
+                                         str(body.get("exec_state") or ""),
+                                         note=str(body.get("note") or ""))
+                    except Exception as e:
+                        self._send(400, {"ok": False, "error": str(e)})
+                        return
+                    self._send(200 if r.get("ok") else 404, r)
+                    return
+            if path.startswith("/turn"):
+                import turn as _trn
+                if method == "GET" and path in ("/turn/stats", "/turn/log"):
+                    with m.lock:
+                        st = _trn.stats(m.card.db)
+                    self._send(200, dict({"ok": True}, **st))
+                    return
+                if method == "GET" and path.startswith("/turn/"):
+                    tid = path[len("/turn/"):].strip()
+                    with m.lock:
+                        row = _trn.get(m.card.db, tid)
+                    if not row:
+                        self._send(404, {"ok": False, "error": "no_such_turn"})
+                        return
+                    self._send(200, {"ok": True, "turn": row})
+                    return
+            if path in ("/distill/stats", "/distill/run"):
+                import distill as _ds2
+                with m.lock:
+                    _ds2.ensure(m.card.db)
+                    if path == "/distill/stats":
+                        return self._send(200, {"ok": True,
+                                                "stats": _ds2.stats(m.card.db)})
+                    _lim = 10
+                    try:
+                        _lim = int((body or {}).get("limit") or 10)
+                    except Exception:
+                        _lim = 10
+                    _r = m.card.distill_learning(limit=_lim)
+                    return self._send(200, {"ok": True,
+                                            "skill": _r.get("skill"),
+                                            "insight": _r.get("insight"),
+                                            "err": _r.get("err"),
+                                            "stats": _ds2.stats(m.card.db)})
+
+            if path in ("/retention", "/retention/set"):
+                import card2 as _c2
+                if method == "GET":
+                    with m.lock:
+                        rows = m.card.db.execute(
+                            "SELECT tier, COUNT(*) n FROM mem GROUP BY tier").fetchall()
+                        cnt = {str(r[0]): int(r[1]) for r in rows}
+                    self._send(200, {"ok": True, "tiers": cnt,
+                                     "core": list(_c2.CORE_TIERS),
+                                     "protected": _c2.TIER_PROTECTED,
+                                     "ephemeral": _c2.TIER_EPHEMERAL,
+                                     "flash_ttl_h": round(_c2.FLASH_TTL / 3600.0, 1)})
+                    return
+                body = self._body()
+                mid = int(body.get("mid") or 0)
+                tier = str(body.get("tier") or "").strip()
+                if not mid or not tier:
+                    self._send(400, {"ok": False, "error": "need mid & tier"})
+                    return
+                with m.lock:
+                    try:
+                        m.card.set_tier(mid, tier)
+                    except Exception as e:
+                        self._send(400, {"ok": False, "error": str(e)})
+                        return
+                self._send(200, {"ok": True, "mid": mid, "tier": tier})
+                return
             if method == "GET" and path == "/dream/pending":
                 # 梦境压缩（卡侧）：把还没消化的对话原文掏出来给外面的提炼器。
                 # 顺手带上死信：失败过的批次要让人看得见、能重试，不能静默烂在库里。
@@ -1797,6 +2434,20 @@ class Handler(BaseHTTPRequestHandler):
                                        "tasks": _learn.listing(m.card.db, limit=5)}
                     except Exception as e:
                         ov["learn"] = {"err": str(e)}
+                    try:
+                        # V9.0：反馈环也露一面 —— 态度、意向、复盘各取几条
+                        fb = m.card.feedback
+                        ov["fb"] = {"stats": fb.stats(),
+                                    "intentions": fb.active_intentions()[:4],
+                                    "reviews": fb.list_reviews(limit=2),
+                                    "affect": []}
+                        try:
+                            import impression_eval as _ie
+                            ov["fb"]["affect"] = _ie.snapshot(m.card.db, limit=4) or []
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        ov["fb"] = {"err": str(e)}
                 return self._send(200, ov)
             if method == "GET" and path == "/avatar":
                 # 头像文件本身。走文件不走数据库 —— 见 console.py 的说明。
@@ -1919,6 +2570,44 @@ class Handler(BaseHTTPRequestHandler):
                         "stat": m.card.impression_snapshot()})
                 except Exception as e:
                     return self._fail(500, "impression_read", str(e))
+
+            if method == "GET" and path == "/thoughts":
+                try:
+                    import urllib.parse as _qmod
+                    _qq = _qmod.parse_qs(_qmod.urlparse(self.path).query)
+                except Exception:
+                    _qq = {}
+                try:
+                    _n = int((_qq.get("limit") or ["10"])[0])
+                except Exception:
+                    _n = 10
+                with m.lock:
+                    _rows = m.card.thoughts(limit=_n)
+                return self._send(200, {"ok": True, "items": _rows})
+
+            if method == "GET" and path == "/viscera/history":
+                try:
+                    import urllib.parse as _qmod
+                    _qq = _qmod.parse_qs(_qmod.urlparse(self.path).query)
+                except Exception:
+                    _qq = {}
+                try:
+                    _h = float((_qq.get("hours") or ["24"])[0])
+                except Exception:
+                    _h = 24.0
+                with m.lock:
+                    _items = m.card.viscera_history(hours=_h)
+                return self._send(200, {"ok": True, "items": _items})
+
+            if method == "GET" and path == "/identity/check":
+                try:
+                    import urllib.parse as _qmod
+                    _qq = _qmod.parse_qs(_qmod.urlparse(self.path).query)
+                except Exception:
+                    _qq = {}
+                with m.lock:
+                    _idt = m.card.identity_check()
+                return self._send(200, {"ok": True, "identity": _idt})
 
             if method == "GET" and path == "/viscera/profile":
                 try:
@@ -2217,7 +2906,8 @@ class Handler(BaseHTTPRequestHandler):
                         job = m.wq_submit(
                             lambda: m.report(um, body.get("reply") or "",
                                              body.get("ts"),
-                                             source=body.get("source") or "chat"))
+                                             source=body.get("source") or "chat",
+                                             turn_id=body.get("turn_id")))
                         if job is None:
                             return self._fail(429, "queue_full",
                                               "写队列满了（上限 %d），等下一轮"
@@ -2287,9 +2977,12 @@ class Handler(BaseHTTPRequestHandler):
                     #    被踢出去的那些海马分不够 → 直接遗忘（实测丢 1020 条）。
                     #    迁历史必须显式给 pool="long"。
                     _pool = (body.get("pool") or "").strip() or None
-                    if _pool is not None and _pool not in ("short", "medium", "long"):
+                    # 2026-11-21：archive（要存但不要被想起来的东西）也是合法池。
+                    # 原来路由层就把 archive 挡在门口，所以光改 store 里的 dscale 不够。
+                    _POOLS_OK = ("short", "medium", "long", "archive")
+                    if _pool is not None and _pool not in _POOLS_OK:
                         return self._fail(400, "bad_pool",
-                                          "pool 只能是 short/medium/long")
+                                          "pool 只能是 short/medium/long/archive")
                     with m.lock:
                         if m.writer_lock:
                             return self._fail(409, "card_locked",
@@ -3020,6 +3713,24 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 # 观测自己坏了也不能影响请求：这里不留空吞，落个标记位给 /perf 看
                 self._perf_broke = True
+        # R4（2026-11-20）：限流。写接口 120/min、读 600/min；超了直接 429，
+        # 别让轮询脚本把写锁拖死。它不替代 token 闸（那是「你是谁」），只管「你来多快」。
+        try:
+            import guard as _gd0
+            _ip0 = (self.client_address[0] if getattr(self, "client_address", None) else "-")
+            _okr0, _wait0 = _gd0.check(_ip0, "write" if method == "POST" else "read")
+            if not _okr0:
+                self._status = 429
+                _r0 = self._send(429, {"ok": False, "error": "rate_limited",
+                                       "detail": "请求太密，%d 秒后再来" % _wait0})
+                try:
+                    _gd0.note(_ip0, getattr(self, "last_path", ""), 429, 0,
+                              conn=getattr(Handler.mind.card, "db", None))
+                except Exception:
+                    pass
+                return _r0
+        except Exception:
+            pass
         try:
             self._route(method)
         finally:
@@ -3031,6 +3742,15 @@ class Handler(BaseHTTPRequestHandler):
                     rec = None
             dt = time.time() - t0
             self.req_ms = dt * 1000.0
+            # R4：审计（时间 / IP / 方法路径 / 状态码 / 耗时）。攒够再落盘，不拖慢回包。
+            try:
+                import guard as _gd1
+                _ip1 = (self.client_address[0] if getattr(self, "client_address", None) else "-")
+                _gd1.note(_ip1, getattr(self, "last_path", ""),
+                          getattr(self, "_status", 0), self.req_ms,
+                          conn=getattr(Handler.mind.card, "db", None))
+            except Exception:
+                pass
             # 记进环形缓冲：/health 的 p50/p95 就从这儿算（V7 第 14 件补齐）。
             # 只留 (分组, 秒)，不留请求体 —— 这里不能碰任何业务数据。
             _lat_add(path, dt)
@@ -3960,6 +4680,13 @@ def _start_boot_check(mind, delay=1.0):
         chk("world_tick", lambda: bool(getattr(mind, "_world_tick_on", False)
                                        or float(getattr(mind, "_world_tick_last", 0) or 0) > 0))
         chk("readonly", lambda: bool(getattr(mind, "readonly", False)))
+        def _identity():
+            # V10.8：身份锚六个字段被改（或整库替换）时，以前没有任何地方会发现。
+            _r = mind.card.identity_check()
+            if _r.get("ok") is False and _r.get("bad") and _r["bad"] != ["__unsealed__"]:
+                raise ValueError("身份锚对不上：%s" % "、".join(_r["bad"]))
+            return _r
+        chk("identity", _identity)
         def _warm_embed():
             # 第一笔写入 / 第一次召回要现加载语义模型：实测冷启动后第一笔写入排了 111 秒。
             # 自检顺手热一次，别让用户第一句「记住」等在那儿。
@@ -4072,8 +4799,16 @@ def _start_maintenance(mind):
         lrn_sec = float(os.environ.get("WHALE_LEARN_SEC", "1800") or 0)
     except Exception:
         lrn_sec = 1800.0
+    try:
+        outbox_sec = float(os.environ.get("WHALE_OUTBOX_SEC", "300") or 0)
+        act_sec = float(os.environ.get("WHALE_ACT_SEC", "1200") or 0)
+        selfreview_sec = float(os.environ.get("WHALE_SELFREVIEW_SEC", "3600") or 0)
+    except Exception:
+        act_sec = 1200.0
+    kp_sec = float(os.environ.get("WHALE_KEEP_PROMOTE_SEC", "600") or 0)
 
-    last = {"fade": 0.0, "habits": 0.0, "worklog": 0.0, "ckpt": 0.0, "learn": 0.0}
+    last = {"act": 0.0, "selfreview": 0.0, "fade": 0.0, "habits": 0.0, "worklog": 0.0,
+            "ckpt": 0.0, "learn": 0.0, "affect": 0.0, "outbox": 0.0}
     # 线程起来就先记一次心跳：否则 /health 在第一个周期内会误报
     # maintenance_never_ran（明明刚启动，还没来得及跳第一跳）。
     mind._maint_last = time.time()
@@ -4179,6 +4914,22 @@ def _start_maintenance(mind):
                     print("[mind] 工作台清理失败: %s" % e)
                 last["worklog"] = now
 
+            # 0.5) 评价印象褪色（V9.3）：默认一天一次，向中性缓慢回归，不删除。
+            try:
+                _af_sec = float(os.environ.get("WHALE_AFFECT_FADE_SEC", "86400") or 0)
+            except Exception:
+                _af_sec = 86400.0
+            if _af_sec > 0 and now - float(last.get("affect", 0.0) or 0.0) >= _af_sec:
+                try:
+                    import impression_eval as _affe
+                    with mind.lock:
+                        _naf = _affe.fade(mind.card.db, now=now)
+                    if _naf:
+                        print("[mind] 评价印象褪色：%d 条" % _naf)
+                except Exception as e:
+                    print("[mind] 评价印象褪色失败: %s" % e)
+                last["affect"] = now
+
             # 0.8) 签名检查点（V7 第 5 件）：每小时给「走到哪儿了」盖一个带 HMAC
             #      的章。锚是明文 JSON、谁都能改小来掩盖回滚；检查点改一个字就
             #      对不上，而且坏了只报不重建（重建等于把证据冲掉）。
@@ -4281,6 +5032,86 @@ def _start_maintenance(mind):
                 except Exception as e:
                     print("[mind] 学习节拍失败: %s" % e)
 
+            # 2.6) 意向 → 行动（V9.4）：她「想做但还没做」的事，在这里真做掉。
+            #     学习/自查/记一笔，三件都是便宜、可回滚、不需要模型的。
+            if act_sec > 0 and now - last["act"] >= act_sec:
+                try:
+                    with mind.lock:
+                        _ar = mind.card.act_on_intentions(now=now)
+                    last["act"] = now
+                    _dn = (_ar or {}).get("done") or []
+                    if _dn:
+                        print("[mind] 意向行动：%s" % "；".join(
+                            "%s(%s)" % (a, str(c)[:24]) for a, _b, c in _dn))
+                        try:
+                            if mind.tl is not None:
+                                mind.tl.append("act", "意向行动：" + "；".join(
+                                    str(c)[:30] for _a, _b, c in _dn))
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print("[mind] 意向行动失败: %s" % e)
+
+            if selfreview_sec > 0 and now - last.get("selfreview", 0.0) >= selfreview_sec:
+                last["selfreview"] = now
+                try:
+                    with mind.lock:
+                        _sr = mind.card.self_review_tick(now=now)
+                    if _sr.get("review") or _sr.get("model"):
+                        print("[mind] 周自省：%s" % json.dumps(
+                            {"review": _sr.get("review"), "model": _sr.get("model")},
+                            ensure_ascii=False))
+                except Exception as exc:
+                    print("[mind] 周自省失败：%s" % exc)
+
+            # 2.65) keep 晋升（2026-11-21，E1）：被想起很多天的中期记忆升 keep，
+            #       keep 走长期池速率 + 挡自动清理，配额在 tick 的 4c 里裁。
+            ds_sec = float(os.environ.get("WHALE_DISTILL_SEC", "1800") or 0)
+            if ds_sec > 0 and now - last.get("distill", 0.0) >= ds_sec:
+                last["distill"] = now
+                try:
+                    with mind.lock:
+                        _dsr = mind.card.distill_learning(now=now)
+                    if _dsr.get("skill") or _dsr.get("insight"):
+                        print("[mind] 学习回流：技能 +%d，自我认知候选 +%d"
+                              % (len(_dsr.get("skill") or []),
+                                 len(_dsr.get("insight") or [])), flush=True)
+                except Exception as _e:
+                    print("[mind] 学习回流失败：%s" % _e, flush=True)
+
+            if kp_sec > 0 and now - last.get("keep_promote", 0.0) >= kp_sec:
+                try:
+                    with mind.lock:
+                        _kp = mind.card.promote_frequent(now=now)
+                    last["keep_promote"] = now
+                    if _kp:
+                        print("[mind] keep 晋升：%d 条" % len(_kp))
+                        try:
+                            if mind.tl is not None:
+                                mind.tl.append("keep_promote", "升 keep %d 条" % len(_kp))
+                        except Exception:
+                            pass
+                except Exception as _e:
+                    print("[mind] keep 晋升失败: %s" % _e)
+
+            # 2.7) 写入 outbox（V9.7.4）：派生没做成的，在这里退避重试。
+            #     只碰 queued 且到点的，一次最多 5 条，做不成就再等，超限进死信。
+            if outbox_sec > 0 and now - last.get("outbox", 0) >= outbox_sec:
+                try:
+                    with mind.lock:
+                        _orr = mind.card.replay_outbox(limit=5, now=now)
+                    last["outbox"] = now
+                    _ok = [x for x in (_orr or []) if x.get("result") == "ok"]
+                    _bad = [x for x in (_orr or []) if x.get("result") != "ok"]
+                    if _ok:
+                        print("[mind] outbox 补做 %d 条：%s" % (len(_ok), "；".join(
+                            "%s#%s" % (x["kind"], x["ref"]) for x in _ok)))
+                    if _bad:
+                        print("[mind] outbox 仍失败 %d 条：%s" % (len(_bad), "；".join(
+                            "%s#%s(%s)" % (x["kind"], x["ref"], x["result"]) for x in _bad)))
+                except Exception as e:
+                    print("[mind] outbox 节拍失败: %s" % e)
+
     t = threading.Thread(target=loop, name="maintenance", daemon=True)
     mind._maint_thread = t
     t.start()
@@ -4332,6 +5163,15 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--db", default=DEFAULT_DB)
     a = ap.parse_args(argv)
+    # R4（2026-11-20）：安全边界。默认只绑本机；要对外必须显式设 WHALE_ALLOW_NONLOCAL=1，
+    # 否则拒绝启动 —— 「绑 0.0.0.0 忘了关」是这类服务最常见的事故。
+    if str(getattr(a, "host", "127.0.0.1")) not in _LOCAL_HOSTS:
+        if os.environ.get("WHALE_ALLOW_NONLOCAL") != "1":
+            print("[mind] 拒绝启动：--host %s 不是本机地址。确实要对外暴露，"
+                  "请显式设 WHALE_ALLOW_NONLOCAL=1。" % a.host, file=sys.stderr)
+            return 2
+        print("[mind] 警告：绑定 %s（非本机），限流 + token 闸是唯一防线。" % a.host,
+              file=sys.stderr)
 
     if not os.path.exists(a.db):
         print("[mind] 找不到卡：%s" % os.path.abspath(a.db), file=sys.stderr)

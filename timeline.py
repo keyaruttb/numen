@@ -433,6 +433,10 @@ class Timeline(object):
     def mem_tomb_add(self, mid, reason, ts=None, hash_=None):
         """删一条记忆之前，先把它的身份登记进台账。
 
+        【V10.11 备注】生产路径走的是 `cardmix_store._tomb_add()`，两者都用
+        `timeline._birth_hash()`，写出的值逐字节相同。这里保留一份是为了让
+        `timeline` 模块单独可用；删掉没有收益，反而会让它无法独立使用。别删。
+
         为什么：记忆是会正常消失的（侵蚀到头、长期池里没上榜、归档），
         可出生证留在库里。没有台账，校验只能看见「有证没记录」，
         分不清是「她自己忘了」还是「有人把记录抽走了」——

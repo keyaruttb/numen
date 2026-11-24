@@ -47,6 +47,36 @@ import re
 
 
 
+_EMO_BASE = 0.25
+
+
+def _emotion_of(text):
+    """规则打分：这句话有多带情绪（0.05~1.0）。
+
+    为什么不保留 0.25 / 1.0 两档（外部反馈第 ⑦ 条 + 用户 m11864）：
+      落库 2305 条 0.25、246 条 1.0，等于这个字段没信息。这里用四条可解释线索：
+      情感词数量、感叹、疑问、长度；全是能复算的规则，不调模型。
+    影响面：SCORE_W 里 emotion 权重是 0，所以它不动召回排序 —— 修的是字段本身。
+    """
+    t = str(text or "")
+    if not t:
+        return _EMO_BASE
+    v = _EMO_BASE
+    hits = sum(1 for w in EMO_WORDS if w in t)
+    if hits:
+        # 一个情感词就说明这句有态度：0.35 起、每多一个 +0.12，封顶 0.60。
+        v += min(0.60, 0.45 + 0.10 * (hits - 1))
+    if ("！" in t) or ("!" in t):
+        v += 0.15
+    if ("？" in t) or ("?" in t):
+        v += 0.10
+    if len(t) >= 30:
+        v += 0.12
+    if t[:2] in ("嗯，", "嗯。", "哦，", "哦。", "行。"):
+        v -= 0.08
+    return round(max(0.05, min(1.0, v)), 3)
+
+
 def _pid_alive(pid):
     """这个 pid 还活着吗？（Windows 用 OpenProcess，别的平台用 os.kill 0）
 
@@ -81,7 +111,69 @@ def _pid_alive(pid):
         return False
 
 
+
+
+def _split_for_chunks(text, lo=120, hi=240, cap=4):
+    """把一段原文切成 120~240 字的块（按句号类标点切，超长再硬切）。
+
+    为什么要有这一步：chunk 表原来只有早期一次性脚本灌进去的历史块
+    （backfill 214、qq 461、study 329…），新写的记忆一条都不切，
+    于是块检索永远只能翻到老账。
+    """
+    t = (text or "").strip()
+    if len(t) < 40:
+        return []
+    parts, buf = [], ""
+    for ch in t:
+        buf += ch
+        if ch in "。！？；\n" and len(buf) >= lo:
+            parts.append(buf.strip())
+            buf = ""
+    if buf.strip():
+        parts.append(buf.strip())
+    out = []
+    for seg in parts:
+        while len(seg) > hi:
+            out.append(seg[:hi])
+            seg = seg[hi:]
+        if seg:
+            out.append(seg)
+    merged = []
+    for seg in out:
+        if merged and len(merged[-1]) < lo and len(merged[-1]) + len(seg) <= hi:
+            merged[-1] += seg
+        else:
+            merged.append(seg)
+    return [x for x in merged if len(x) >= 20][:cap]
+
 class MixStore:
+
+    def _write_chunks(self, c, mid, text, speaker="", core="", ts=None):
+        """给刚写的记忆切块 + 存 768 维向量。失败不影响正文（调用方兜软失败）。"""
+        try:
+            n = c.execute("SELECT COUNT(*) FROM chunk WHERE mem_id=?",
+                          (mid,)).fetchone()[0]
+        except Exception:
+            n = 0
+        if n:
+            return 0
+        segs = _split_for_chunks(text)
+        if not segs:
+            return 0
+        made = 0
+        for i, seg in enumerate(segs):
+            try:
+                blob = self.semantic.encode(embed_text_for(seg, speaker, core))
+            except Exception:
+                continue
+            if not blob or len(blob) != 3072:
+                continue
+            c.execute("INSERT INTO chunk(mem_id,seq,text,ts,source,emb)"
+                      " VALUES(?,?,?,?,?,?)",
+                      (int(mid), i, seg, ts, "write", blob))
+            made += 1
+        return made
+
     def remember(self, text, salience=0.6, ts=None, pool=None,
                  oxy=0.0, entities=None, emotion=None, normalize=True,
                  region=None, speaker=None, mtype=None, source="",
@@ -156,7 +248,7 @@ class MixStore:
 
         # 情绪强度：从文本里估
         if emotion is None:
-            emotion = 1.0 if any(w in text for w in EMO_WORDS) else 0.25
+            emotion = _emotion_of(text)
         # 实体数：地点 + 数字
         if entities is None:
             entities = len(RE_PLACE.findall(text)) + len(RE_NUM.findall(text))
@@ -284,6 +376,14 @@ class MixStore:
                                " WHERE parent_id=?", (_g * 0.8, dup_id))
                     self.db.commit()
                     self._save_oxy()      # 去重路径也要落盘
+                    # V9.7.2：这条算「更新既有」，不是「新收一条」——记一笔治理判定。
+                    try:
+                        import governance as _gv2
+                        _gv2.decide(self.db, 'mem', dup_id, 'update',
+                                    reason='近重复（%.2f），抬老条目' % (1.0 if _exact_id is not None else best),
+                                    source='write', conflicts=0)
+                    except Exception as _ge:
+                        soft_fail('gov_decide_dedupe', _ge, '治理台账没记上')
                     return dup_id
         except Exception as e:
             # 去重路径挂了不该拖垮「记一条新的」，但必须留痕：
@@ -311,7 +411,8 @@ class MixStore:
             oxy = max(oxy, self.oxy * 0.5)
 
         # 细节衰减也要按池放慢，否则长期档案一进来细节就全丢了
-        dscale = {POOL_SHORT: 1.0, POOL_MEDIUM: 0.25, POOL_LONG: 0.03}[pool]
+        # 2026-11-21：archive（不进召回）是合法池，原来字典里没有 → KeyError → HTTP 500
+        dscale = {POOL_SHORT: 1.0, POOL_MEDIUM: 0.25, POOL_LONG: 0.03}.get(pool, 0.0)
 
         # 🔧 V5.0 T2-1：主干拆成 主语/动词/宾语，供分级侵蚀用
         _subj, _verb, _obj = split_predicate(core)
@@ -360,6 +461,15 @@ class MixStore:
              str(about_uid or ""), _lay, _quar, float(_evts or 0.0), _evprec or "",
              str(sess or ""), _who, _where, _ekind))
         mid = c.lastrowid
+        # 🔧 2026-11-21：给 flash 档一个真正的写入方。
+        #   此前全库只有「到期扫成空壳」的读方，没有任何一处把 tier 写成 flash，
+        #   于是「七日短讯」在真卡上是 0 行 —— 第五次同型病（钩子挂着没接线）。
+        #   规则保守：chatter 分区 + ≤12 字 + 没有实体 → 标 flash，七天到点自然降级。
+        try:
+            if str(region or "") == "chatter" and len(str(text or "")) <= 12 and not entities:
+                c.execute("UPDATE mem SET tier='flash' WHERE id=?", (mid,))
+        except Exception as _fle:
+            soft_fail("flash_tier", _fle, "标 flash 失败")
         # V5.4：正式入库的记忆也在收件层留一份原文（kept=1）。
         # 这样短期池淘汰之后，60 小时内还能从收件层把它原样翻回来 —
         # 「原文进短期」不再依赖我每轮都记得调 /report。
@@ -386,11 +496,25 @@ class MixStore:
         self.db.commit()
         # 语义近邻：拿刚存的 emb 直接算，不重新编码。放在 commit 之后，
         # 补边失败也不能连累这条记忆本身。
+        # 2026-11-22（外部评审 §2.2）：新记忆也要切块，否则块检索只翻得到历史账。
+        if os.environ.get("WHALE_CHUNK_WRITE", "1") not in ("0", "false", "off"):
+            try:
+                self._write_chunks(c, mid, text, speaker, core, at)
+            except Exception as _ce:
+                soft_fail("chunk_write", _ce, "切块失败")
         if _emb is not None:
             try:
                 self.synapse.add_semantic_edges([mid], [_emb])
             except Exception as _se:
+                # 补边失败不再只打印一句：进 outbox，退避重试，真不行进死信。
                 print("[card2] 语义边补建失败: %s" % _se)
+                try:
+                    import outbox as _ob
+                    _ob.ensure(self.db)
+                    _ob.enqueue(self.db, "synapse_edges", mid,
+                                payload={"mid": int(mid)}, now=self.clock.now())
+                except Exception as _oe:
+                    soft_fail("outbox_synapse", _oe, "连 outbox 都没记上")
         # 共现：这条和「上一条」连一笔（同一个人优先，没有就按全局）
         try:
             _au2 = str(about_uid or "")
@@ -429,16 +553,11 @@ class MixStore:
         #    印象层的出口是 hint_lines —— 那句子的主语是「他常说」，
         #    自己的话一旦混进来，她就会把自己的技术日志当成他的口头禅。
         #    所以：自己的话不进印象层。她自己的说话习惯归 habits 层（那边挖的是 self）。
+        # 2026-11-20：印象的写入抽成独立口子（_impress_write），
+        #    它有自己的触发与失败边界，不再散在 remember 的流程里。
+        #    语义不变：自己的话不进印象层（否则会把她自己的开发日志当成他的口头禅）。
         if (speaker or "") != "self":
-            try:
-                impression_mod.observe(
-                    self.db,
-                    subject=(about_uid or ("user" if (speaker or "") == "user" else "")),
-                    text=text, ts=(ts if ts is not None else self.clock.now()),
-                    subject_kind=("person" if (about_uid or speaker) else "thing"),
-                    now=self.clock.now())
-            except Exception as _ie:
-                print("[card2] 印象记账失败: %s" % _ie)
+            self._impress_write(text, ts=ts, speaker=speaker, about_uid=about_uid)
 
         # ---- 事实层（V5.7）：抽「谁 · 什么事 · 什么」-------------------------
         # 只做索引，不改原文。抽不出就不抽（宁可少一条，不要错一条）。
@@ -916,10 +1035,14 @@ class MixStore:
         now = float(now if now is not None else time.time())
         c = self.db
         try:
-            n1 = c.execute("DELETE FROM worklog WHERE kind='work' AND ts < ?",
-                           (now - days_work * 86400.0,)).rowcount
+            # V10.7：迁移来的历史（source=migrated:*）不动 —— 那是来时路，不是工作台。
+            n1 = c.execute(
+                "DELETE FROM worklog WHERE kind='work' AND ts < ?"
+                " AND COALESCE(source,'') NOT LIKE 'migrated:%'",
+                (now - days_work * 86400.0,)).rowcount
             n2 = c.execute(
-                "DELETE FROM worklog WHERE kind!='work' AND ts < ?",
+                "DELETE FROM worklog WHERE kind!='work' AND ts < ?"
+                " AND COALESCE(source,'') NOT LIKE 'migrated:%'",
                 (now - days_keep * 86400.0,)).rowcount
             c.commit()
             return int(n1 or 0) + int(n2 or 0)

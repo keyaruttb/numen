@@ -143,7 +143,7 @@ python tools/migrate.py --from D:\card.db --to E:\card\card.db --confirm # 真�
 记忆写入（一次 report 应让 `mem/dialogue/inbox/mem_birth` 各 +2）、记忆召回、
 突触联动、上下文装配、情绪内脏（24 激素 + PAD）、状态总览、MCP 工具、干净退出。
 
-三种卡都实测过（2026-11-18）：示例卡 14/14、真卡副本（2313 条）14/14、迁移后的卡 14/14。
+三种卡都实测过（2026-11-18）：示例卡 14/14、真卡副本（2313 条）14/14、迁移后的卡 14/14。**注**：那次迁移用的旧卡此后没有保留，现在 `--mode migrate` 的复验只能用示例卡与真卡副本跑——「迁移后可用」有当时的记录，但没有可重跑的证据。
 
 ---
 
@@ -224,3 +224,8 @@ python tools/migrate.py --from D:\card.db --to E:\card\card.db     # 干跑，�
 ```
 
 对外交付时，把 `reports/deploy-report.md` 一起给人 —— 那份报告就是他能不能信的凭据。
+
+## 两条踩过的坑（2026-11-22 补）
+
+1. **迁移历史一律用 `note` 进来，别用 `work`**：`worklog_prune()` 会把 `kind='work'` 且超过 14 天的行删掉（V10.7 起另加保护：`source LIKE 'migrated:%'` 不删）。迁移脚本请写 `kind='note'` 且 `source='migrated:<来源>'`。
+2. **`tools/` 要整个放到 `<卡目录>\tools\` 下**：`doctor.py` / `accept.py` / `migrate.py` 里对 `bridge.py`、`card.db`、`runtime/` 的相对路径是按「卡目录」算的；放到别处会找不到卡，报的却是「卡不存在」。

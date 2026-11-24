@@ -580,6 +580,37 @@ class SynapseNet(object):
         return self._adj
 
     # ---------- 电势扩散 ----------
+    def weaken(self, mem_ids, factor=0.5, now=None):
+        """V9.2：负反馈后弱化相连边（只压权重、减 fire_count，不删边）。"""
+        ids = [int(x) for x in (mem_ids or []) if x]
+        if not ids:
+            return 0
+        now = float(now if now is not None else time.time())
+        c = self.db.cursor()
+        n = 0
+        for mid in ids:
+            try:
+                conns = c.execute(
+                    "SELECT id, weight, fire_count FROM synapse"
+                    " WHERE a_id=? OR b_id=?", (mid, mid)).fetchall()
+            except Exception:
+                continue
+            for row in conns:
+                try:
+                    w = max(0.1, float(row["weight"] or 0.1) * float(factor))
+                    fc = max(0, int(row["fire_count"] or 0) - 1)
+                    c.execute("UPDATE synapse SET weight=?, fire_count=?,"
+                              " last_fire_ts=? WHERE id=?",
+                              (w, fc, now, int(row["id"])))
+                    n += 1
+                except Exception:
+                    pass
+        try:
+            self.db.commit()
+        except Exception:
+            pass
+        return n
+
     def spread(self, seeds, top_k=5):
         """从种子出发沿突触扩散电势
 
