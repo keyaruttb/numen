@@ -871,11 +871,6 @@ class Mind(object):
                 _max_before = 0
             mid = self.card.remember(user_message, ts=ts, source=source,
                                  about_uid=self.local_uid)
-            # 2026-11-19：入门筛拦住时 remember() 返回 False（0 条未写）。
-            #   /report 对外的语义一直是 None=没写，这里是唯一的转换点，
-            #   调用方看到的返回体一个字都没变。
-            if mid is False:
-                mid = None
             # 出生证：记忆落库就上链（只锁出生那一刻，不锁权重）
             if self.tl is not None and mid:
                 try:
@@ -916,8 +911,6 @@ class Mind(object):
                         reply, ts=ts, salience=0.45,
                         speaker="self", mtype="episode", source=source,
                         about_uid=self.local_uid)
-                    if reply_mid is False:   # 入门筛：对外仍是 None=没写
-                        reply_mid = None
                     if self.tl is not None and reply_mid:
                         self.tl.birth_stamp(reply_mid)
                 except Exception as e:
@@ -3001,25 +2994,9 @@ class Handler(BaseHTTPRequestHandler):
                                 region=body.get("region"),
                                 source=src,
                                 about_uid=str(body.get("about_uid") or ""),
-                                # 2026-11-19 入门筛：/remember 是**公共写入口**，
-                                #   不是「他明确说记」。qq_guard / qq_say / bridge /
-                                #   diary / mind_remember 都走这条，一律要被筛。
-                                #   只有调用方显式带 explicit=1/true/yes 才跳过筛
-                                #   （"人明确要求记下来"那条路）。
-                                #   2026-11-19 修：JSON 布尔 true → str() 得到 "True"（大写），
-                                #   原来不在白名单里 → explicit:true 反被拦。加 lower()。
-                                force=(str(body.get("explicit") or "").strip().lower()
-                                       in ("1", "true", "yes")),
                                 **_kw)
                         except Exception as e:
                             return self._fail(500, "remember_failed", str(e))
-                        # 2026-11-19：被入门筛拦住 → remember() 返回 False。
-                        #   以前和「剥完壳是空的」共用 None，回执一律写成
-                        #   empty_after_strip，看日志的人分不出这两种。
-                        if mid is False:
-                            return self._send(200, {"ok": True, "mem_id": None,
-                                                    "skipped": "gate_low_value",
-                                                    "source": src, "birth": None})
                         # 2026-11-05：剥完壳是空的（纯系统工单）→ 不写、明确告诉调用方
                         if mid is None:
                             return self._send(200, {"ok": True, "mem_id": None,

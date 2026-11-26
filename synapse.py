@@ -640,7 +640,13 @@ class SynapseNet(object):
                     cur = nxt.get(other)
                     # 电势相同时优先语义边：不能让先遍历到的时序边
                     # 仅靠插入顺序把语义路径顶掉。
-                    if cur is None or (np_, pri) > (cur[0], cur[1]):
+                    # 🔧 2026-11-25：原来这里写的是 (np_, pri) > (cur[0], cur[1])，
+                    #    cur[1] 存的是 kind（字符串），pri 是 int —— Python 3 比不了。
+                    #    电势恰好相等时（第 2 跳起必然出现）抛 TypeError，
+                    #    被 card2.py 的 except 吞掉，_last_assoc_ids 恒空，
+                    #    于是 assemble_context 的 assoc 分节 20 天来一次都没出过内容。
+                    #    同一个函数第 650 行比的就是 KIND_PRIORITY，这里照抄那个写法。
+                    if cur is None or (np_, pri) > (cur[0], KIND_PRIORITY.get(cur[1], 0)):
                         nxt[other] = (np_, kind)
             if not nxt:
                 break

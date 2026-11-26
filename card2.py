@@ -298,16 +298,7 @@ RENDER_LEGACY = os.environ.get("WHALE_RENDER_LEGACY", "") == "1"
 # 它既没提高标准答案片段的到达率，补出来的又常是半句（「多出来的『因果』正是我最缺的——」），
 # 等于往每一行里塞噪声。留开关不删代码，将来有更好的挑法再用。
 RENDER_DETAIL_ADD = os.environ.get("WHALE_RENDER_DETAIL", "") == "1"
-# 🔧 2026-11-23（重复召回修复 · 第 1 处）：RECALL_DEDUP 从 1.01 改回 0.92。
-#    原来 1.01 = 永久关闭这条去重（jaccard 上限就是 1.0，>= 1.01 永不成立）。
-#    为什么是 0.92 而不是注释里试过的 0.72：拿真卡 card.db 全表算过一遍分布 ——
-#    963 条参与比较、463,203 对里，jaccard>=0.72 的只有 33 对，且**全部正好 =1.0000**，
-#    0.72~0.99 区间是空的（0 对）。也就是说在这张卡上 0.72 和 0.92 的误伤数一样，
-#    都是 0 对；0.92 只是跟写入端的 DEDUPE_JACCARD=0.92 对齐，读写同一把尺子。
-#    「0.72 实测略降」是 714 题 bench 上的结论，那批数据里有大量措辞不同的同类句；
-#    真卡里没有这种对，所以不拿 bench 的结论压真卡的分布。
-#    怎么回退：改回 1.01（或直接覆盖回 card2.py.bak-20261123-215515-before-recalldedup）。
-RECALL_DEDUP = 0.92           # 想起格内两条原话相似度超过它就只留一条
+RECALL_DEDUP = 1.01           # 想起格内两条原话相似度超过它就只留一条（V5.6.2-F：实测 0.72 略降，先关）
 _WIDE_WORDS = ("多久", "什么时候", "哪天", "几号", "几天", "几次", "以前", "之前",
                "去年", "上个月", "上周", "后来", "最后", "还有", "另外", "分别",
                "都说了", "一共", "加起来", "先后", "经过")
@@ -368,21 +359,6 @@ MULTIHOP_ON = False           # 多跳：第二跳只留实词再召一遍（V5.
 MULTIHOP_K = 3                # 第二跳最多补几条
 _HOP_STOP = set("我你他她它们的了吗呢吧啊呀是在有和就都也很还这那个什么谁哪怎么为时候说过话上下前后")
 NEIGHBOR_HOURS = 36.0          # 邻居取多宽的时段（V5.6.2-B）
-
-# 🔧 2026-11-24（心光 X1-2）：心流的 H —— 上一念留下的那个「缘」。
-#
-#   等无间缘：前念灭，恰好给后念让出位置，中间不留空档。
-#   所以 H 不是「上一念的残留」，是「前一念灭掉之后留给下一念的条件」。
-#   它该能进这一轮的候选，但【排在同分之后】—— 还没散，不等于现在也重要。
-#
-#   三个参数都是拍的初值，等 X1-3 实测再定：
-#     H_WINDOW_SEC  多久之内的 H 还算「还没散」。一小时：一次对话的尺度。
-#     H_TOPK        第二路召回几条。3：和联想补的条数同量级，别喧宾夺主。
-#     H_DECAY       降权系数。0.60：让它能进来，但压不过本轮直接命中。
-H_WINDOW_SEC = float(os.environ.get("WHALE_H_WINDOW", "3600") or 3600)
-H_TOPK = int(os.environ.get("WHALE_H_TOPK", "3") or 3)
-H_DECAY = float(os.environ.get("WHALE_H_DECAY", "0.60") or 0.60)
-H_SKIP_SAME = 0.95             # 本轮 query 和上轮太像（>= 这个 jaccard）就跳过第二路，省一次召回
 NEIGHBOR_PER_HIT = 2           # 每条召回最多带几个邻居
 NEIGHBOR_MAX = 0               # 邻居总数上限（V5.6.2：实测零收益/挤掉正主，先关）
 
@@ -623,7 +599,6 @@ from cardtext import (classify_region, embed_text_for, guess_mtype, guess_speake
 
 # 池子数学搬进 poolmath.py（拆门面第 4 批）。常量也一起搬，这里同名导出，调用点不改。
 from poolmath import (CHATTER_PERSON_SCALE, CORE_TIERS, DAY, K_ARCHIVE, K_DEEP, LAM_CHATTER, LAM_L, LAM_M, LAM_S1, LAM_S2, LONG_PROTECT_DAYS, POOL_ARCHIVE, POOL_DEEP, POOL_LONG, POOL_MEDIUM, POOL_MEDIUM_WARM, POOL_SHORT, POOL_SHORT_WARM, REGION_DECAY_SCALE, REGION_HALF_LIFE, REGION_OWN_LAMBDA, R_CHATTER, R_EPISODE, R_FACT, R_FLASH, R_HABIT, R_PLAY, R_PREF, R_SELF, R_STUDY, R_WORK, S_SHORT_PHASE, TIER_CORE_FIXED, TIER_CORE_MUTABLE, TIER_CORE_TAG, WARM_SLOW, _LOAD_F, _REGION_LAMBDA_ON, _json, _safe_json, chatter_lambda, effective_lambda, lam_for, load_factor, pool_of_k, region_decay_scale, relation_scale, stage_factor, weight_now, wn_row, MEDIA_DROP_W, MEDIA_DECAY_B, MEDIA_TAU_DAYS, LOAD_TAU, _f_of, media_weight_now, region_snapshot_from_db, REGION_DAY_BUDGET, LOAD_F_MIN, LOAD_F_MAX)  # noqa: E402
-
 from body import (Clock, EMO_WORDS, ETA_OXY_DN, ETA_OXY_UP, HURT_WORDS, INTIMATE_WORDS, K_MOOD, K_MOOD_HOME, MOOD_LABEL, MOOD_MAX, MOOD_MIN, MOOD_NEUTRAL, MOOD_SPAN, OFFLINE_POLICY, OXY_INERTIA_BASE, OXY_INERTIA_MAX, OXY_INERTIA_MIN, assess_trust, assess_value, compress_offline_dt, mood_drift_home, mood_of_event, mood_text, offline_effective, oxy_signal, pad_label, update_mood, update_oxy)  # noqa: E402
 from vmath import _PUNCT, _STOP_CHARS  # noqa: E402  （拆门面后这两个私有名留在 vmath）
 from diag import (_SOFT_FAIL, soft_fail, soft_fail_snapshot)  # noqa: E402
@@ -936,41 +911,11 @@ def _brief_line(raw, limit=110):
     return s
 
 
-SCORE_W = (0.70, 0.40, 0.00, 0.00)
+SCORE_W = (0.35, 0.30, 0.00, 0.00)
 # 后两项是「权重项」与「新近项」，不是下面并集的另外两路。
 # 2026-11-21 有人问过这个：注释夸并集、代码却把它们归零，看着像改到一半。
 # 实际情况 —— 并集（RRF）端到端只有 46.6%，比单路余弦的 50.2% 还低（+1 在噪声内），
 # 所以并集留在实验开关里（WHALE_UNION），生产打分只保留语义 + 字面。
-#
-# 🔧 2026-11-24（二改）：上游 V9-3 给的是 (0.35, 0.30)，本仓重新标定成 (0.70, 0.40)。
-#
-#    上游那次改动的注释是「cosine over-weighted regressed on refreshed card」——
-#    他们也发现纯余弦权重过高会退步。但 0.35 是给他们那张卡量的。
-#
-#    本仓这张卡 920 条真实对话，在固定快照上的扫描（sweep-scorew.py，
-#    22 条本地题，候选池固定 top=200，只改 SCORE_W）：
-#
-#      (w0, w1)     R@1      R@3
-#      (0.35,0.30)  59.1%    68.2%   ← 上游值，R@3 掉了 9 个点
-#      (0.45,0.30)  54.5%    77.3%
-#      (0.50,0.30)  59.1%    77.3%   ┐
-#      (0.50,0.40)  54.5%    68.2%   │
-#      (0.65,0.35)  59.1%    77.3%   │ 平台
-#      (0.70,0.40)  59.1%    77.3%   │ ← 取这一档（中部）
-#      (0.85,0.40)  59.1%    77.3%   │
-#      (1.00,0.45)  59.1%    77.3%   ┘
-#      (1.00,0.30)  50.0%    77.3%   ← 合并前的值
-#      (1.30,0.30)  45.5%    77.3%
-#
-#    为什么取 (0.70, 0.40) 而不是最高点：0.50~1.00 / 0.30~0.45 这一片
-#    全是 59.1%/77.3%，是一条平台。按规矩「参数在平台中部取，不贴着最优点挑」。
-#
-#    为什么不是直接留上游的 0.35：那个值让 R@1 更高但 R@3 掉到 68.2%。
-#    R@3 是体验指标（上下文里给前 3 条，答案在不在），不能拿它换 R@1。
-#
-#    怎么验：C:\Python312\python.exe -X utf8 C:\dsh\_ops\eval-recall.py
-#             --card C:\dsh\_ops\_eval-snapshot.db --cases C:\dsh\_ops\cases-local.json --top 13
-#    怎么回退：改回 (0.35, 0.30) 用上游值，或 (1.00, 0.30) 用合并前的值
 
 # ---- V9 候选并集（2026-11-19）------------------------------------------
 # 417 题实测（bench，只读副本）：单通道语义 50.2% / 分块 46.9% / 字面 39.3%，
@@ -1356,8 +1301,6 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
     def __init__(self, db_path=":memory:", clock=None, card_dir=None):
         # 2026-11-19：这里原来先调了一次 _schema_heal()，但那时 self.db / db_path 还没就位，
         # 异常被 except 吞掉 —— 等于没补。真正的补齐挪到 _init_schema()/_migrate() 之后。
-        # （合并说明 2026-11-24：二改侧和上游侧是同一个修复的两份注释，取上游这份，
-        #   它多提了 _migrate()。实际代码两边一致，没有行为差异。）
         self.clock = clock or Clock()
         self.db_path = db_path
         # 承诺账本（2026-11-11 接进读侧）：表在同一个库里，但**不在 mem 池**——
@@ -1438,12 +1381,6 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         except Exception:
             pass
         self._ensure_soft_cols()
-        # 2026-11-19：heal 必须在 _db_main 建好、schema 建完之后跑（它要用 self.db）。
-        # 原来在 __init__ 开头调用，库还没开 ⇒ AttributeError 被 except 吞掉 ⇒ 从没执行过。
-        try:
-            self._schema_heal()
-        except Exception as _she:
-            print("[card2] schema_heal 失败: %s" % _she)
         self._ensure_cond_table()
         # 运行时配置表（V5.0 §10.9）：场景权重能热改，不用重启服务。
         # 建表在这里而不是 ctxweight 里自己管 —— 卡的所有 schema 只在一个地方建，
@@ -3068,9 +3005,6 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             #    否则一升级就冒出几百条"待做梦"，控制台那个 520 会吓死人，
             #    而且 Dream 会拿三周前的对话去重压一遍 —— 那不是补账，是重复劳动。
             c.execute("UPDATE dialogue SET dreamed=1")
-        # 2026-11-22：撤掉 dialogue 的 speaker 列（8366922 加的）。
-        #   作者原设计只有 role（user/assistant）两值，不分第三方。
-        #   生命卡只装「我和你」，别人的话走 inbox 群消息通道。
         c.execute("CREATE INDEX IF NOT EXISTS ix_detail_parent ON detail(parent_id)")
         self.db.commit()
 
@@ -3464,7 +3398,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 mid = self.remember(it["text"], salience=it["salience"],
                                     region=it["region"], speaker=speaker,
                                     mtype="episode", source=src_tag)
-                if not mid:   # 2026-11-19：None=剥空/去重，False=被入门筛拦（都不算写进去）
+                if mid is None:
                     problems.append("dedup_by_remember:%s" % it["text"][:16])
                     continue
                 try:
@@ -5522,6 +5456,16 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             " WHERE id=?",
             (new_text, new_text, json.dumps(hist, ensure_ascii=False), ts,
              int(mid)))
+        # ⚠ 2026-11-25 撤回：这里曾经加过「重算出生证哈希」，理由是 supersede
+        #    改完正文后 /health 会报 birth_ok=false「记忆被改过」。
+        #    撤掉的原因：作者对这件事的意图没查清。
+        #      · 文档只写了 remember() 里调 birth_stamp()（介绍书-V8.md:111），
+        #        没写 supersede 之后要不要重盖；
+        #      · 出生证的设计目的是「卡要能自证没被改过」（介绍书-V8.md:22），
+        #        自动重盖会让「合法改写」和「偷偷改 raw」在证上分不出来。
+        #    所以这里保持上游原样。遇到合法 supersede 触发 birth_bad 时，
+        #    正确做法是人工确认后单独重盖那一条（一次性数据修正，
+        #    不写进代码路径），或者先在文档里把作者意图问清楚。
         self.db.commit()
         return True
 
@@ -7726,15 +7670,12 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         if persona:
             lines.append("我的性格和说话方式：")
             lines.append(persona)
-        # 习惯：从 habits 表里捞几条「我平时怎么说」。
-        # 2026-11-04 加。跟性格分开写，因为性格是「我是什么样的人」，
-        # 习惯是「具体场合下我常怎么开口」—— 前者不该被数据改，后者本来就该变。
-        hints = self.habit_hints()
-        if hints:
-            lines.append("我平时说话的口气（是参考，不是台词；"
-                         "没有合适的场合就别硬用）：")
-            for h in hints:
-                lines.append("· " + h)
+        # 习惯层：2026-11-24 按「只留卡的人格和记忆」删掉（这是唯一保留在 card2.py 的改动）。
+        #   原来这里调 habit_hints()，往【我是谁】末尾挂 5 条「我平时说话的口气」。
+        #   实际挖出来的是高频二字组碎片 ——「我会用「说得对我」这种说法」
+        #   「我会用「的那件事」这种说法」，「说得对我」根本不是话。
+        #   不是人格，是统计噪声，而且每轮都进上下文。
+        #   代码留着（habit_hints 本身没删），只是不再拼进人格段。
         return "\n".join(lines)
 
     # ---------- 习惯层 v2：只读地捞几条给上下文用 ----------
@@ -8085,59 +8026,6 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 _dq = self._defer_q = []
             _dq.append(([h[2]["id"] for h in hits], query))
 
-        # 🔧 2026-11-24（心光 X1-2）：把上一念留下的「缘」接进这一轮的候选。
-        #
-        #    等无间缘：前念灭，恰好给后念让出位置。所以 H 不是「上一念的残留」，
-        #    是「前一念灭掉之后留给下一念的那个条件」。它该能进来，
-        #    但【排在同分之后】—— 还没散，不等于现在也重要，所以乘 H_DECAY 降权。
-        #
-        #    ⚠ 必须带 assoc=False。作者在上面 6969 行留过警告：
-        #      「任何在主体召回之后追加的 recall()，都必须给它加 assoc=False；
-        #        否则那次会重算联想、把 _last_assoc_ids 整体覆盖掉，
-        #        下面读到的就不是主体召回的标记，正文里的【顺带想起】会标错。」
-        #      多跳那次（6958）就是没加，所以它现在只能默认关着。
-        #
-        #    ⚠ access=False：第二路召回不该改写记忆的召回计数，
-        #      否则「想一下」这个动作会把上一次的话题永久抬上去。
-        #      （作者 T1-1「遗忘与联想解耦」讲的就是这个）
-        #
-        #    跳过条件：本轮 query 和上轮太像（jaccard >= H_SKIP_SAME）就不召。
-        #      连续问同一件事时，第二路必然捞回同一批，等于白花一次召回。
-        _H_prev = None
-        if H_TOPK > 0 and H_DECAY > 0:
-            try:
-                _hraw = self.identity.get_live("H")
-                if _hraw:
-                    _H_prev = json.loads(_hraw)
-            except Exception as _he:
-                _H_prev = None
-                soft_fail("live_H_read", _he, "上一念的缘读不出来，这一轮退化成不跨轮")
-
-        if _H_prev and (_H_prev.get("q") or "").strip():
-            try:
-                _h_age = now - float(_H_prev.get("ts") or 0)
-            except Exception:
-                _h_age = -1.0
-            _h_same = False
-            try:
-                _h_same = jaccard(_H_prev.get("q") or "", query or "") >= H_SKIP_SAME
-            except Exception:
-                _h_same = False
-            if (0.0 <= _h_age <= H_WINDOW_SEC) and not _h_same:
-                try:
-                    _hh = self.recall(_H_prev["q"], top_k=H_TOPK, access=False,
-                                      assoc=False, about_uid=(about_uid or None))
-                except Exception as _he2:
-                    _hh = []
-                    soft_fail("live_H_recall", _he2)
-                _hids = set((h[2]["id"] if h[2]["id"] else 0) for h in hits)
-                for _h in _hh:
-                    _mid = _h[2]["id"]
-                    if _mid in _hids:
-                        continue
-                    _hids.add(_mid)
-                    hits.append((float(_h[0]) * H_DECAY, _h[1], _h[2]))
-
         # 🔧 V5.6.2-H：多跳。原句召一遍保语义，实词再召一遍保字面，
         #    两组按 id 合并 —— 分散在几条聊天里的线索，一条向量是拼不回的。
         if MULTIHOP_ON and _q:
@@ -8155,15 +8043,6 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                         continue
                     _ids.add(_mid)
                     hits.append(_h)
-        # 这一行读的是「最后一次 recall()」留下的 _last_assoc_ids：它记的是哪几条是
-        # 顺带勾出来的（联想来的），每次 recall 开头在 6107 清空、6111 重写。6103-6106
-        # 那段注释是设计契约 —— 对外只返回 3 元组，要区分的调用方自己查这个集合。
-        # 现在安全：MULTIHOP_ON（357）默认 False，多跳那次 recall（6930）不跑，
-        # 所以最后一次 recall 就是 6915 的主体召回，这里读到的是它的联想标记。
-        # 什么时候会坏：谁把 MULTIHOP_ON 改成 True，就必须给 6930 那次调用加
-        # assoc=False（recall 的 assoc 默认 True，见 5703）；否则那次会重算联想、
-        # 把 _last_assoc_ids 整体覆盖成 MULTIHOP_K=3 小召回那套 id，
-        # 这里读到的就不是主体召回的标记，正文里的【顺带想起】会标错。
         assoc_ids = getattr(self, "_last_assoc_ids", set())
 
         # 🔧 V5.7-C 实验（2026-11-08）：拓宽候选漏斗。
@@ -8216,24 +8095,8 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                 continue
             _dd.append(_h)
             _dtext.append(_t)
-        # 🔧 2026-11-23（重复召回修复 · 第 2 处）：删掉 `if len(_dd) >= 3` 这道门槛。
-        #    改前：`if len(_dd) >= 3: fresh = _dd`；改后：`fresh = _dd`。
-        #    ⚠ 先说实话：**这次重复的症状不是它造成的**。实测（WHALE_DEBUG_RECALL=1，
-        #    query「还记得数灵之息的定时唤醒吗」）：hits=21，候选里不止那 6 条重复，
-        #    去重后 len(_dd)=17 >= 3，门槛成立，去重照常生效。也就是说 6 条重复
-        #    能进渲染，唯一原因是 RECALL_DEDUP=1.01 让 jaccard 比较永不成立
-        #    （1.0 >= 1.01 是 False），第 1 处那行才是本次的元凶。
-        #    那为什么还要删它：门槛数的是**去重后**还剩几条，而不是"去掉了重复"。
-        #    候选池窄的时候（top_k 小、命中被同一句占满），6 条重复去重后剩 1 条，
-        #    1 < 3 → 这个分支不执行 → fresh 保持 6 条，重复原样复活。
-        #    也就是「去重干得越好越被撤销」。删掉它，这条路就断了。
-        #    判据：改前只修阈值（门槛还在）跑 6 条 query，重复占用已经是 0 —— 说明
-        #    删门槛不改变当前卡的行为；两边渲染行数逐条相同（11/9/8/9/8/9 行）。
-        #    为什么不担心「去重去光了」：_dd 第一条无条件入列，fresh 非空则 _dd 必非空，
-        #    而上面 6992 `if not fresh: fresh = hits[:2]` 已经负责了「全被滤光」的兜底。
-        #    怎么回退：恢复 `if len(_dd) >= 3: fresh = _dd`，
-        #    或整文件覆盖回 card2.py.bak-20261123-215515-before-recalldedup。
-        fresh = _dd
+        if len(_dd) >= 3:
+            fresh = _dd
 
         # 🔧 V5.6.2-B：把「同一时段的邻居」也捞进来。
         #    考题里最难的一类是「分散在不同聊天里的信息能不能拼起来」——
@@ -8265,26 +8128,7 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                         break
                 if len(_nb) >= NEIGHBOR_MAX:
                     break
-            # 🔧 2026-11-23（重复召回修复 · 第 3 处）：邻居也要过去重。
-            #    上面的 `_seen_ids` 只按 **id** 挡（`hits` 的 id + `shown_ids`），
-            #    而「同一件事说过几遍」是 id 不同、raw 几乎一样 ——
-            #    那些句子挡不住，邻居这一段就会把刚去掉的重复又捞回来。
-            #    现在 7011 的 jaccard 去重只作用在 `fresh` 上，邻居是在它**之后**
-            #    append 的，等于同一个洞的下半截。
-            #    修法：拿 `fresh` 现有的 raw 当基准，逐条比 jaccard；
-            #    先放进去的邻居也进基准，所以邻居之间也互相去重。
-            #    阈值沿用 RECALL_DEDUP（=0.92），跟上面那段同一把尺子。
-            #    ⚠ 基准要从 `fresh` 现取，不能用 `_dtext`：6992 的
-            #    `if not fresh: fresh = hits[:2]` 兜底那一路不会往 `_dtext` 里写。
-            #    怎么回退：删掉 _nb_seen_txt 那两行判断，恢复成
-            #    `for _r in _nb: fresh.append(...)`；
-            #    或整文件覆盖回 card2.py.bak-20261123-221432-before-neighbor-dedup。
-            _nb_seen_txt = [(h[2]["raw"] or "") for h in fresh if (h[2]["raw"] or "")]
             for _r in _nb:
-                _rt = (_r["raw"] or "")
-                if any(jaccard(_rt, _x) >= RECALL_DEDUP for _x in _nb_seen_txt):
-                    continue
-                _nb_seen_txt.append(_rt)
                 fresh.append((0.0, float(_r["w"] or 0.0), _r))
         except Exception:
             pass
@@ -8400,10 +8244,6 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
             shown_ids.add(r["id"])
             _picked_ids.append(int(r["id"]))
             used += len(line)
-        # 🔧 2026-11-24（心光 X1-1 前置）：先占位，别让 `_weak` 在 lines 为空时未定义。
-        #    原来它只在 `if lines:` 里面赋值，下面写 H 时要引用它，
-        #    lines 为空就会 NameError —— 这种「以为有、其实没赋值」的错今天已经踩过一次。
-        _weak = None
         if lines:
             # 低置信：top1 分数太低就别硬装记得 —— 把「可能」写在脸上，
             # 比编一条顺口的更接近三条底线。
@@ -8424,58 +8264,6 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
                     n_lines=len(lines), ms=int((time.time() - _trace_t0) * 1000))
         except Exception as _te:
             print("[card2] 召回 trace 落盘失败: %s" % _te)
-
-        # 🔧 2026-11-24（心光 X1-1）：把这一轮「选了什么」留给下一轮。
-        #
-        #    这是心流公式的第三段 H_i = Update(H_i, Y_i)。
-        #    小凌工程第 08 集：W_i = Select(C_i, M_j, H_i) / Y_i = Process(W_i) /
-        #    H_i = Update(H_i, Y_i) —— 卡里前两段有，第三段从来没有。
-        #    具体表现：assemble_context 每轮从零拼，recent_lines 是宿主从会话尾部
-        #    抄来的一串字符串，不是「上一轮我选了哪几条、为什么停」。
-        #    所以卡的「想」不跨轮连续，H 恒为空。
-        #
-        #    存哪：live_zone（identity.py:109 建表，set_live/get_live 写齐），
-        #    但实测 0 行 —— set_live 从来没被调用过一次，是个空抽屉。
-        #
-        #    为什么记这四样：
-        #      picked  —— 这一轮真端进上下文的 mem id（下一轮当第二路召回的种子）
-        #      stopped —— 为什么停：budget(预算用尽) / full(条数到顶) / empty(一条没有)
-        #      weak    —— 低不低置信（下一轮可以拿它判断要不要放宽）
-        #      q       —— 本轮 query 摘要（下一轮的第二路召回要用它）
-        #
-        #    写失败就退化成现在的行为，不抛 —— 这一步不该成为新的故障点。
-        #
-        #    🔴 2026-11-24 09:15 修一个自己引入的 32 秒卡顿：
-        #    原来这里调 self.identity.set_live("H", ...)，而 IdentityAnchor
-        #    的 self.db 是 __init__ 时存下的【主连接】（card2.py:1398）。
-        #    但 assemble_context 在 /context 里是跑在 card.reading() 里的 ——
-        #    那条路径用的是另一条 TLS 连接。两个连接写同一张表，就要抢写锁，
-        #    而 busy_timeout=30000 ⇒ 每次 /context 卡满 30 秒。
-        #    实测（diag-assemble-parts.py，monkey-patch 逐 helper 计时）：
-        #        identity.set_live  32.438s   ← 全部在这里
-        #        recall              0.376s
-        #        archive_search      0.043s
-        #    修法：改用 self.db —— 它就是当前上下文的连接（reading() 里是 TLS 那条），
-        #    自己写自己 commit，不跨连接，不抢锁。
-        #    注意必须 commit：reading() 的 finally 会把未提交事务 rollback 掉。
-        try:
-            _H = {
-                "picked": _picked_ids[:13],
-                "stopped": ("empty" if not lines
-                            else ("budget" if dropped else "full")),
-                "weak": (bool(_weak) if lines else None),
-                "q": (query or "")[:80],
-                "ts": now,
-            }
-            _hv = json.dumps(_H, ensure_ascii=False)
-            self.db.execute(
-                "INSERT INTO live_zone(key,val,updated_ts) VALUES(?,?,?) "
-                "ON CONFLICT(key) DO UPDATE SET val=excluded.val,"
-                " updated_ts=excluded.updated_ts",
-                ("H", _hv, time.time()))
-            self.db.commit()
-        except Exception as _he:
-            soft_fail("live_H", _he, "上一念的缘没写进 live_zone，这一轮退化成不跨轮")
 
 
         # 🗄 冷档兜底（2026-11-09）：眼前的事一条都没想起来（或只有一两条），

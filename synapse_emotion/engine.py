@@ -158,44 +158,32 @@ class EmotionEngine:
     def apply_wallclock_gap(self) -> None:
         """真实时间流逝也应当让情绪冷却（不是只有对话轮次才算时间）。
 
-        ⚠ 2026-11-23 更正一处我自己的误判：
-          我一开始以为「这个函数写了没人调」。**错了** —— `_load()` 最后一行就在调它
-          （`engine.py:124`，注释写着「关了几天再打开，情绪先自然回落」）。
-          所以五条调质**每次卡启动都会按真实时长回落**，只是回落后不落盘（没有 save）。
-          ⇒ 真正没人管的是 **`fatigue`**：它只在 `step()` 的 `_update_fatigue()` 里变，
-            而那个只有对话才跑。于是「没对话」时疲劳永远卡着（实测卡在 0.921、把 DA 脉冲折损到 49%）。
-          ⇒ 所以这个函数真正该补的是 fatigue，不是五调质（五调质 `_load()` 已经补过了）。
+        2026-11-24 回退到作者原样。这里曾被改成 960 轮上限 + 顺手补 fatigue，
+        理由写在当时：40 轮（1 小时）意味着「睡个午觉情绪就归零」太粗暴。
+        退掉的理由不是那个理由不成立，是**我们没有数据支撑它**：
+        只有一个 40 轮的常数、一次实测、和一句直觉。
+        先按作者设计跑一段时间，攒够真实数据再谈改不改。
+
+        ⚠ 保留一条当时查出来的事实（对以后有用，但它不构成改代码的理由）：
+          `_load()` 第 124 行本来就在调这个函数（注释「关了几天再打开，情绪先自然回落」），
+          所以「真实时间流逝」作者是覆盖了的。我 11-23 写「这个函数没人调」是误判。
+          真正没人管的是 **fatigue** —— 它只在 `step()` 的 `_update_fatigue()` 里变，
+          没对话时就一直卡着（实测卡在 0.921，把 DA 脉冲折损到 49%）。
+          这条待观察，见 `C:/dsh/_溯/待观察-情绪衰减-20261124.md`。
         """
         gap = time.time() - self.last_ts
-        # 🔧 2026-11-23：上限从 40 轮（= 1 小时）改成 **960 轮（= 1 天）**。
-        #    卡主原话：「一次性补算合理，但超过一个小时就完全冷却是不是太快了」。
-        #    40 轮意味着「睡个午觉情绪就归零」，对 CORT（半衰期 8 轮）和 OT（16 轮）太粗暴。
-        #    改成一天之后：睡一夜该淡的都淡了，但不会「一小时前的情绪就没了」。
-        #    ⚠ 这个上限的真正作用不是「限制冷却」，是 **防时钟跳变**。
-        turns = min(gap / 90.0, 960.0)     # 90 秒 ≈ 1 轮；上限 = 一天
+        turns = min(gap / 90.0, 40.0)     # 90 秒 ≈ 1 轮
         if turns > 0.2:
             self.decay(turns)
-            # 疲劳也按真实时间恢复。条件跟 `_update_fatigue` 一致：
-            # 只有 CORT 回落到阈值以下才算「缓过来了」（decay 已经先把它降下来了）。
-            f = self.cfg["fatigue"]
-            if self.st["CORT"] < f["cort_threshold"]:
-                self.fatigue = clip(self.fatigue
-                                    - f["recover"] * turns * (1.0 - 0.3 * self.st["OT"]))
 
     # ------------------------------------------------------------- ① 安全评估
     def _update_safety(self, ap: Appraisal) -> None:
         s = self.cfg["safety"]
         threat = max(ap.threat, ap.boundary) * (1.0 - 0.75 * ap.repair)
-        raw_target = (0.45 * self.st["OT"] + 0.45 * (1.0 - threat) + 0.10 * (1.0 - ap.cold)
+        target = clip(0.45 * self.st["OT"] + 0.45 * (1.0 - threat) + 0.10 * (1.0 - ap.cold)
                       + 0.30 * ap.repair)  # 道歉/安抚能把安全感真正拉回来
         if ap.empathy_pain > 0.3:      # 共情场景：我在意你，安全反而升高
-            raw_target = raw_target + 0.10
-        # 🔧 2026-11-23：加软底（goal 第②条）。
-        #    原来 target 会被 threat=1.0 + OT≈0 压到 0.07，safety 8 轮就从 0.85 塌到 0.29。
-        #    而 gate_lo=0.55 —— 0.29 和 0.35 对 gate 是同一件事（都关死）。
-        #    ⇒ 再往下没有信息量，只让「恢复」多花几轮。软底 0.35 的语义是
-        #      「再糟也不会比这更没安全感」，不是「不许没安全感」。
-        target = clip(max(0.35, raw_target))
+            target = clip(target + 0.10)
         rate = s["down_rate"] if target < self.safety else s["up_rate"]
         self.safety += (target - self.safety) * rate
         self.safety = clip(self.safety)
@@ -418,7 +406,7 @@ class EmotionEngine:
         self.rep = {k: v for k, v in self.rep.items() if v > 0.05}
 
         self._drift(ap, rpe, v_actual)
-        self._update_fatigue(dt, ap)
+        self._update_fatigue(dt)
         self._update_endogenous()
 
         # 情绪分类
@@ -475,7 +463,7 @@ class EmotionEngine:
         self.base["OT"] = clip(self.base["OT"], lo, hi)
         self.base["CORT"] = clip(self.base["CORT"], lo, hi)
 
-    def _update_fatigue(self, dt: float, ap: Optional[Appraisal] = None) -> None:
+    def _update_fatigue(self, dt: float) -> None:
         f = self.cfg["fatigue"]
         over = self.st["CORT"] - f["cort_threshold"]
         if over > 0:
@@ -492,20 +480,6 @@ class EmotionEngine:
             self.fatigue += f["accumulate"] * (over * 2.0) * dt
         else:
             self.fatigue -= f["recover"] * dt * (1.0 - 0.3 * self.st["OT"])
-        # 🔧 2026-11-23：加一条「被安抚就缓过来」的通路。
-        #    原来的恢复只有一个入口：`CORT < cort_threshold(0.38)`。
-        #    而实测（qq_state\emotion\xiyin.json）CORT=0.407 长期压在阈值上方 0.027，
-        #    于是 fatigue 卡在 0.921 —— 只涨不落，而疲劳会把 DA 脉冲折损到 49%
-        #    （fat_f = 1 - 0.55*0.921），日常对话于是「怎么都没反应」。
-        #    语义上：疲劳是「应激耗竭」，**有人哄、被关心本来就该缓解它**，
-        #    不该只看 CORT 这一个数。所以把 repair（道歉/安抚）和 care（关心）也接进来。
-        #    两边可以同时发生：一边还绷着（CORT 高在涨），一边被哄（这里在降）—— 那是对的。
-        #    系数用 cfg 里的 fatigue.relief，没配就 0.055（约等于 accumulate 的量级）。
-        if ap is not None:
-            relief = 0.75 * float(getattr(ap, "repair", 0.0) or 0.0) \
-                   + 0.45 * float(getattr(ap, "care", 0.0) or 0.0)
-            if relief > 0:
-                self.fatigue -= float(f.get("relief", 0.055)) * relief * dt
         self.fatigue = clip(self.fatigue)
 
     def _update_endogenous(self) -> None:
