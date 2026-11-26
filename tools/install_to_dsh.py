@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""把卡的原生通道（dsh-whale-bridge 插件）接进 DSH。
+"""把卡的原生通道（dsh-numen-bridge 插件）接进 DSH。
 
 为什么需要这一步：
     「卡」是记忆和状态，「DSH」是嘴和脑子。卡搬到了新机器，如果 DSH 里没有
     这个插件，DSH 就不知道卡存在 —— 每轮只能手工敲命令行，等于白搬。
 
 它做三件事，全部幂等（重复跑安全）：
-    1. 把卡目录里的 dsh-plugin/ 拷进 <DSH>/profiles/<profile>/node_modules/dsh-whale-bridge
-    2. 在 profile 的 package.json 的 dsh.profile.bundles 里加上 dsh-whale-bridge
-    3. 在 profile 的 cordis.patch.yml 里加一条 whale-bridge（路径按**这台机器**写）
+    1. 把卡目录里的 dsh-plugin/ 拷进 <DSH>/profiles/<profile>/node_modules/dsh-numen-bridge
+    2. 在 profile 的 package.json 的 dsh.profile.bundles 里加上 dsh-numen-bridge
+    3. 在 profile 的 cordis.patch.yml 里加一条 numen-bridge（路径按**这台机器**写）
 
 用法：
     python tools\\install_to_dsh.py            # 自动找 profile
@@ -29,7 +29,7 @@ try:
 except Exception:
     pass
 
-PLUGIN_NAME = "dsh-whale-bridge"
+PLUGIN_NAME = "dsh-numen-bridge"
 SRC = os.path.join(ROOT, "dsh-plugin")
 
 
@@ -104,13 +104,13 @@ def patch_cordis(profile_dir, dry=False):
         return False, "没有 %s（这个 profile 不完整）" % p
     with io.open(p, encoding="utf-8") as f:
         txt = f.read()
-    if "- id: whale-bridge" in txt:
+    if "- id: numen-bridge" in txt:
         return True, "cordis.patch.yml 里已经有了"
 
     block = "\n".join([
         "",
         "# ===== 小鲸鱼：卡的原生通道（由 tools/install_to_dsh.py 写入）=====",
-        "- id: whale-bridge",
+        "- id: numen-bridge",
         '  name: "%s"' % PLUGIN_NAME,
         "  config:",
         "    host: 127.0.0.1",
@@ -123,11 +123,11 @@ def patch_cordis(profile_dir, dry=False):
         "",
     ])
     if dry:
-        return True, "会在 cordis.patch.yml 末尾加一条 whale-bridge"
+        return True, "会在 cordis.patch.yml 末尾加一条 numen-bridge"
     try:
         with io.open(p, "w", encoding="utf-8", newline="\n") as f:
             f.write(txt.rstrip("\n") + "\n" + block)
-        return True, "cordis.patch.yml 已加 whale-bridge"
+        return True, "cordis.patch.yml 已加 numen-bridge"
     except Exception as e:
         return False, "写 cordis.patch.yml 失败：%s" % e
 

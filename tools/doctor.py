@@ -24,7 +24,7 @@ r"""体检：这台机器能不能跑这张卡。
     卡       文件在、能读、mem 条数、journal_mode、出生证缺口、向量维度、写租约
     模型     模型目录在不在、和卡里的向量维度对不对得上
     服务     端口 8848 上有没有本卡的服务；有的话读 /health 看链/锚/备份状态
-    通道     qq_state/api_token.txt、~/.dsh/profile、dsh-whale-bridge 插件
+    通道     qq_state/api_token.txt、~/.dsh/profile、dsh-numen-bridge 插件
     磁盘     剩余空间
     DSH      在不在（不在也能跑卡，只是接不上 agent）
 
@@ -321,12 +321,18 @@ def check_channel(card):
         return
     profs = [d for d in os.listdir(dsh) if os.path.isdir(os.path.join(dsh, d))]
     ok("DSH profile", ", ".join(profs[:6]))
-    plug = os.path.join(dsh, "desktop", "node_modules", "dsh-whale-bridge")
-    if os.path.isdir(plug):
-        ok("MCP 插件", plug)
+    # 扫所有 profile 找通道插件，不写死 desktop ——
+    # 2026-11-26 从零走一遍时发现：写死 "desktop" 会在用别的 profile 的机器上误报「没装」。
+    _plugs = []
+    for _p in profs:
+        _q = os.path.join(dsh, _p, "node_modules", "dsh-numen-bridge")
+        if os.path.isdir(_q):
+            _plugs.append(_p)
+    if _plugs:
+        ok("MCP 插件", "已装：" + ", ".join(_plugs))
     else:
-        warn("MCP 插件", "desktop profile 里没装 dsh-whale-bridge",
-             "python tools/install_to_dsh.py --profile desktop")
+        warn("MCP 插件", "没有任何 profile 装了 dsh-numen-bridge",
+             "python tools/install_to_dsh.py --profile %s" % (profs[0] if profs else "desktop"))
 
 
 def check_disk(card):
