@@ -37,6 +37,10 @@ import shutil
 import socket
 import sqlite3
 import sys
+
+# 提示里用「当前这个解释器」的路径，不要写死 python / py ——
+# 2026-11-26：机器上同时有 3.12 和 3.14 时，写死 python 会装到错的版本上。
+_PYQ = ('"%s"' % sys.executable) if " " in sys.executable else sys.executable
 import time
 import urllib.request
 
@@ -98,14 +102,14 @@ def check_pkgs():
             ok("依赖:" + name, "%s（%s）" % (ver, why))
         else:
             must("依赖:" + name, "缺（%s）：%s" % (why, err[:100]),
-                 "python -m pip install -r requirements.txt")
+                 "%s -m pip install -r requirements.txt" % _PYQ)
     for name, why in NICE:
         ver, _ = _pkg(name)
         if ver:
             ok("可选:" + name, ver)
         else:
             warn("可选:" + name, "没装（%s 降级，不影响记忆/召回）" % why,
-                 "python -m pip install " + name)
+                 "%s -m pip install " % _PYQ + name)
     # structure.py 要加载随仓库分发的 _structure_orig.pyc（编译自 3.12）
     try:
         sys.path.insert(0, ROOT)
