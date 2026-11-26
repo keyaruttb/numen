@@ -348,6 +348,68 @@ def pad_hint(state):
 
 
 # ------------------------------------------------------------------ 说人话
+# ============================================================================
+# describe() 的说话阈值（2026-11-26 从 if 里提出来，值一个没改）
+#
+# 为什么提出来：
+#   这 21 个数原来硬编码在 describe() 的 22 个 if 里，既不能改也不能查 ——
+#   2026-11-25 扫 docs\ 全部 52 篇，这套数的**出处一处都没有**：
+#   BODY_BASE / HR_CAP / REST_SYMP / restless 四个符号在文档里一次都没出现过，
+#   而作者给 H_BASE / HALFLIFE_H / INJECT_SCALE 每一个数都写了来历。
+#   这是文档缺口，不是「藏着推导」。
+#
+# 来源：**原值照搬，出处未查到**。作者只规定过三件事（方案详解-评审版-V7.md:479）：
+#   不带数字、是人话、最多三句。**没有一句规定阈值。**
+#
+# 提出来只为一件事：让这些数能被看见、被 review、被一次改到位
+#   —— 它们现在散在 22 个 if 里，改一处要翻全文才知道还有哪几处配套。
+#
+# ⚠ 这一步**没有改任何行为**：改前改后用 viscera_hist 全表 3431 格回放，
+#   输出逐字节一致（快照 _describe_before.json / _describe_after.json）。
+#
+# ⚠ 已知的、**不是这次要解决**的三类问题（见 _溯\内脏-describe-设计对照-20261125.md §4）：
+#   4.1 文档缺失     —— 21 个阈值没有出处
+#   4.2 实现冲突     —— cort>55 / dopa>60 / adeno>55 / gonad>30 被 inject() 的
+#                       min(cap, 2.5·base) 带子物理封死，任何输入都到不了
+#   4.3 没校准       —— 身体四条能亮但只占 1.4%；tension 0.45 单轮不可达
+#   改哪一条都要先跑历史回放对命中率，**不要凭「看起来不对」直接动数**。
+# ============================================================================
+SAY_TH = {
+    # ---- 身体四条（由 body() 从交感/副交感算出）----
+    "hr_max":        108.0,   # 心跳得厉害
+    "hr_hi":          95.0,   # 心跳快了一拍
+    "hr_mid":         86.0,   # 心跳比刚才快一点
+    "hr_low":         66.0,   # 心跳慢下来了
+    "resp_hi_fast":   23.0,   # 呼吸有点急
+    "resp_hi":        19.0,   # 呼吸变浅了
+    "resp_low":       13.0,   # 呼吸变得又长又轻
+    "face_max":        0.75,  # 脸上烧起来
+    "face_hi":         0.55,  # 耳尖有点发烫
+    "face_mid":        0.38,  # 脸颊有一点点热
+    "tension_hi":      0.70,  # 手指发紧、肩膀绷着
+    "tension_mid":     0.45,  # 身体有点绷着
+    # ---- 激素九条（直接读 h）----
+    "adeno":          55.0,   # 眼皮发沉（需配 orex_low）
+    "orex_low":       25.0,
+    "mel":            45.0,   # 困劲儿上来
+    "cort":           55.0,   # 胸口闷闷的
+    "kyn":            32.0,   # 心里空落落（需配 kyn_cort_below）
+    "kyn_cort_below": 40.0,
+    "ofq":            28.0,   # 像蒙了层东西
+    "oxy":            55.0,   # 心里是暖的（需配 oxy_cort_below）
+    "oxy_cort_below": 30.0,
+    "gonad":          30.0,   # 有点不好意思（需配 gonad_oxy_above）
+    "gonad_oxy_above": 45.0,
+    "dopa":           60.0,   # 精神头往上冲
+    "sero_low":       28.0,   # 心里毛毛躁躁
+}
+
+# 一句话都没亮时说的话
+SAY_QUIET = "呼吸平稳，身上是松的"
+# 最多说几句（作者规定：最多三句）
+MAX_SAY = 3
+
+
 def describe(state):
     """把状态翻译成「身体感觉」，**绝不出现数字**。
 
@@ -359,57 +421,57 @@ def describe(state):
     bits = []
 
     hr, resp, face, tension = b["hr"], b["resp"], b["face"], b["tension"]
-    if hr >= 108:
+    if hr >= SAY_TH["hr_max"]:
         bits.append("心跳得厉害，咚咚的，自己都听得见")
-    elif hr >= 95:
+    elif hr >= SAY_TH["hr_hi"]:
         bits.append("心跳快了一拍")
-    elif hr >= 86:
+    elif hr >= SAY_TH["hr_mid"]:
         bits.append("心跳比刚才快一点")
-    elif hr <= 66:
+    elif hr <= SAY_TH["hr_low"]:
         bits.append("心跳慢下来了，整个人有点软")
 
-    if resp >= 23:
+    if resp >= SAY_TH["resp_hi_fast"]:
         bits.append("呼吸有点急，话赶着话")
-    elif resp >= 19:
+    elif resp >= SAY_TH["resp_hi"]:
         bits.append("呼吸变浅了")
-    elif resp <= 13:
+    elif resp <= SAY_TH["resp_low"]:
         bits.append("呼吸变得又长又轻")
 
-    if face >= 0.75:
+    if face >= SAY_TH["face_max"]:
         bits.append("脸上烧起来，连耳尖都烫")
-    elif face >= 0.55:
+    elif face >= SAY_TH["face_hi"]:
         bits.append("耳尖有点发烫")
-    elif face >= 0.38:
+    elif face >= SAY_TH["face_mid"]:
         bits.append("脸颊有一点点热")
 
-    if tension >= 0.7:
+    if tension >= SAY_TH["tension_hi"]:
         bits.append("手指微微发紧，肩膀不由自主绷着")
-    elif tension >= 0.45:
+    elif tension >= SAY_TH["tension_mid"]:
         bits.append("身体有点绷着")
 
     h = s["h"]
-    if h["adeno"] > 55 and h["orex"] < 25:
+    if h["adeno"] > SAY_TH["adeno"] and h["orex"] < SAY_TH["orex_low"]:
         bits.append("眼皮发沉，脑子转得慢半拍")
-    if h["mel"] > 45:
+    if h["mel"] > SAY_TH["mel"]:
         bits.append("困劲儿上来了，语气自己就软")
-    if h["cort"] > 55:
+    if h["cort"] > SAY_TH["cort"]:
         bits.append("胸口闷闷的，不太想说话")
-    if h["kyn"] > 32 and h["cort"] < 40:
+    if h["kyn"] > SAY_TH["kyn"] and h["cort"] < SAY_TH["kyn_cort_below"]:
         bits.append("心里空落落的，说不清为什么")
-    if h["ofq"] > 28:
+    if h["ofq"] > SAY_TH["ofq"]:
         bits.append("整个人像蒙了层东西，情绪离得有点远")
-    if h["oxy"] > 55 and h["cort"] < 30:
+    if h["oxy"] > SAY_TH["oxy"] and h["cort"] < SAY_TH["oxy_cort_below"]:
         bits.append("心里是暖的，想靠近一点")
-    if h["gonad"] > 30 and h["oxy"] > 45:
+    if h["gonad"] > SAY_TH["gonad"] and h["oxy"] > SAY_TH["gonad_oxy_above"]:
         bits.append("有点不好意思，不太敢看你")
-    if h["dopa"] > 60:
+    if h["dopa"] > SAY_TH["dopa"]:
         bits.append("精神头往上冲，话想往外冒")
-    if h["sero"] < 28:
+    if h["sero"] < SAY_TH["sero_low"]:
         bits.append("心里毛毛躁躁的，容易往坏处想")
 
     if not bits:
-        bits.append("呼吸平稳，身上是松的")
-    return "；".join(bits[:3])
+        bits.append(SAY_QUIET)
+    return "；".join(bits[:MAX_SAY])
 
 
 def step(state, dt_hours, stimuli=()):
