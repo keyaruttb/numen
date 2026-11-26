@@ -610,6 +610,26 @@ class MixStore:
         self.db.commit()
         return cur.lastrowid
 
+    # ---- 池迁移记账（2026-11-26 加）----
+    # 为什么加：`mem.history` 字段注释写着「演化史」，但 `_consolidate` 改 pool 时
+    # 从来没写过它 —— 2026-11-26 想追溯一条 4372 字的对话是怎么从短期升到长期的，
+    # 库里空空如也，只能靠 recall_n / oxy 这些残量反算。
+    # 只加记录，不改任何判据：分数、门槛、阈值一个字没动。
+    # 上限 20 条，防止长寿命记忆把 history 撑成无限长。
+    def _hist_add(self, c, r, now, text, why):
+        try:
+            hist = json.loads(r["history"] or "[]")
+            if not isinstance(hist, list):
+                hist = []
+        except Exception:
+            hist = []
+        hist.append({"ts": round(float(now), 1), "text": str(text),
+                     "why": str(why)[:300]})
+        if len(hist) > 20:
+            hist = hist[-20:]
+        c.execute("UPDATE mem SET history=? WHERE id=?",
+                  (json.dumps(hist, ensure_ascii=False), r["id"]))
+
     def _consolidate(self, r, now):
         """短期池结算：算海马分，够格进中期/长期；不够格的到期沉到中期（V5.6.3 起不再删）"""
         score = self._hippocampus_score(r)
@@ -667,6 +687,8 @@ class MixStore:
                 if r["tier"] != TIER_CORE_MUTABLE or r["pool"] != POOL_LONG:
                     c.execute("UPDATE mem SET pool=?, w=?, tier=? WHERE id=?",
                               (POOL_LONG, 1.0, TIER_CORE_MUTABLE, r["id"]))
+                    self._hist_add(c, r, now, "%s→%s" % (r["pool"], POOL_LONG),
+                                   "pin=1 钉住：不判遗忘、不评分数，tier 提到 core_mutable，w=1.0")
                 return POOL_LONG
         except Exception:
             pass
@@ -697,6 +719,8 @@ class MixStore:
                 return None
             c.execute("UPDATE mem SET pool=?, pool_in_ts=? WHERE id=?",
                       (POOL_MEDIUM, now, r["id"]))
+            self._hist_add(c, r, now, "%s→%s" % (r["pool"], POOL_MEDIUM),
+                           "region=chatter：不参加海马评选，只换池名，按 LAM_CHATTER 自己淡")
             return POOL_MEDIUM
         if (not _dirty) and score >= THETA_LONG_STRICT and self._long_ticket_ok(r):
             target, floor = POOL_LONG, W_FLOOR_LONG
@@ -731,6 +755,9 @@ class MixStore:
                 if score >= THETA_MEDIUM:
                     c.execute("UPDATE mem SET pool=?, pool_in_ts=? WHERE id=?",
                               (POOL_MEDIUM, now, r["id"]))
+                    self._hist_add(c, r, now, "%s→%s" % (r["pool"], POOL_MEDIUM),
+                                   "短期满 %d 天沉底：海马分 %.3f ≥ 中期线 %.2f"
+                                   % (int(SHORT_MAX_TTL // 86400), score, THETA_MEDIUM))
                     return POOL_MEDIUM
                 # 分数不够中期线，留在短期继续衰减，不抬走
                 return None
@@ -742,6 +769,13 @@ class MixStore:
         c.execute("UPDATE mem SET pool=?, w=?, t_anchor=?, tier=?,"
                   " pool_in_ts=? WHERE id=?",
                   (target, wn, now, tier, now, r["id"]))
+        # 记账：把「为什么是这个分、过了哪条线、验票结果」一起写下来，
+        # 以后不用像 11-26 那样靠 recall_n/oxy 反算。
+        _ticket = "是" if target == POOL_LONG and self._long_ticket_ok(r) else "否"
+        self._hist_add(c, r, now, "%s→%s" % (r["pool"], target),
+                       "海马分 %.3f；进长期线 %.2f / 中期线 %.2f；验票 recall_n=%d；w 抬到 %.3f；tier=%s"
+                       % (score, THETA_LONG_STRICT, THETA_MEDIUM,
+                          int(r["recall_n"] or 0), wn, tier))
         return target
 
 
