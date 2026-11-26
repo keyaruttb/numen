@@ -8466,8 +8466,26 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
 
         # ⑤.5 身体（快反应层）：一句话就能动的那一层。
         #     放在【此刻】前面 —— 生理反应比情绪先来，顺序本身也是信息。
+        #
+        # 2026-11-26 修：原来这里写的是 `self.viscera_line() if touch else ""`，
+        #   而 `touch` 管的是「要不要打卡里那条刺激」（viscera_touch，有副作用）。
+        #   2026-11-20 为了让【此刻】读到「被这句话影响之后」的情绪，把刺激挪到
+        #   组装之前先写掉，然后传 touch=False 免得同一句打两遍 ——
+        #   副作用是这一格跟着一起被关掉了，【身体】从此再没进过上下文。
+        #
+        #   判据（不是「看起来不对」）：
+        #     · docs\技术说明-V5.6.txt:511 的装配顺序里，⑥【身体】是设计的一格，
+        #       而且 :342 专门写了「位置在【此刻】之前 —— 顺序本身也是信息」；
+        #     · 2026-11-26 实测 /context，sections 19 个键里没有 viscera，
+        #       prompt 20 个段标题里没有【身体】；
+        #     · viscera_line() 是纯读（只读 self.v + 调 describe()），无副作用，
+        #       与「打不打刺激」无关 —— 不该跟着 touch 一起关。
+        #
+        #   预算：这一格不参与 used 的逐格记账，实测 est_tokens 是事后统计
+        #   （len(text)），不是事前约束；多出的是「【身体】+ 十来个字」，
+        #   占正常一轮 prompt 的 0.3% 上下。
         try:
-            vtxt = self.viscera_line() if touch else ""
+            vtxt = self.viscera_line()
         except Exception:
             vtxt = ""
         if vtxt:
