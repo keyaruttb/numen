@@ -77,7 +77,6 @@ _verify_out*
 *_old_probe.py
 _split-*/
 
-# ---------- 三个自研插件：要入库，放行 ----------
+# ---------- 两个自研插件：要入库，放行 ----------
 !dsh-autoreport/
-!dsh-shuling-breath/
 !dsh-thinking-guard/

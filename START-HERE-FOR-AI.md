@@ -1,8 +1,9 @@
 # 给 AI 的入口：从仓库链接到「部署完成并验收」
 
 > 这份文件是给**外部 AI / DSH** 看的操作手册。人是可以看的，但人看 [`DEPLOY.md`](DEPLOY.md) 更快。
-> 目标：拿到 `https://gitee.com/wang-jun-12121/whale-card` 之后，不需要问作者任何问题，
-> 就能判断场景、查环境、部署、验收、出报告。
+> 目标：拿到 `https://github.com/keyaruttb/numen`（**数灵生命卡**，不是上游的数字生命卡）之后，
+> 不需要问任何问题，就能判断场景、查环境、部署、验收、出报告。
+> 上游出处：`https://gitee.com/wang-jun-12121/whale-card`（作者 戊己 × 汐音，MIT）
 
 ---
 

@@ -78,12 +78,11 @@ reading() 连接上 assemble_context   32.925s → 0.497s   （65 倍）
 真进程 /context                     33,500ms → 472ms   （71 倍）
 ```
 
-### 4. 三个自研插件
+### 4. 两个自研插件
 
 ```
 dsh-autoreport/       每轮自动落卡（上游靠自觉，实测漏过 15 轮）
 dsh-thinking-guard/   推理复读检测（出现过两次空回）
-dsh-shuling-breath/   呼吸插件（移植版，未启用）
 ```
 
 ### 5. `.gitignore` 重写
