@@ -1,0 +1,19 @@
+# dsh-numen-mindgate bundle patch。
+#
+# 一个插件、一个 fiber，不需要别的 bundle 层。
+# 装法（本地开发用 junction，不经过 pnpm，避免把 lockfile 搞坏）：
+#   mklink /J "%USERPROFILE%\.dsh\profiles\web\node_modules\dsh-numen-mindgate" "C:\dsh\_card\dsh-mindgate"
+#
+# 它跟 dsh-numen-autoreport 是一对：
+#   autoreport  每轮结束 → POST /report   把这一轮写回卡
+#   mindgate    每轮开始 → POST /context  把卡里的我读进系统提示
+# 一头写、一头读，缺一头就是「只熏不生」。
+- insert:
+    - id: numen-mindgate
+      name: dsh-numen-mindgate
+      config:
+        host: 127.0.0.1
+        port: 8848
+        tokenFile: 'C:\dsh\_card\qq_state\api_token.txt'
+        timeoutMs: 4000
+        enabled: true
