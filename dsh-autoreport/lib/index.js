@@ -168,11 +168,64 @@ const autoreportProjection = {
 
 // ---------------------------------------------------------------- 上报
 
-function makeReporter(config) {
+export function makeReporter(config) {
   const host = config?.host || '127.0.0.1';
   const port = Number(config?.port) || 8848;
   const tokenFile = config?.tokenFile || '';
   const source = config?.source || 'autoreport';
+
+  // ---- 门（2026-11-27 加，跟 dsh-numen-mindgate 联动）----
+  // mindgate 每轮把「这一轮 /context 注入成功了吗」写成这个文件。
+  // 我们读它：没注入成功的那一轮**不写回卡** —— 只说「不收」，不截断对话。
+  //
+  // 为什么不是「拦住不让说」：说错了能改，卡里那条废记忆要改就得删，而删记忆是动本体。
+  // 断「熏习」比断「现行」准。
+  //
+  // 三条规则，顺序不能反：
+  //   ① 文件不存在 / 读不了 / 解析失败 → **放行**（退化成没有 mindgate 时的行为）
+  //   ② 状态里的 turn_ts 跟这一轮差超过 GATE_TOLERANCE_MS → 不是同一轮 → 放行
+  //   ③ ok === false 且是同一轮 → 拒绝，并把这一轮记进 blocked（**永不重试**）
+  //
+  // 为什么必须按 turn_ts 对齐、不能只看「最新状态」：
+  //   可能上一轮成功、这一轮失败交错着。看最新状态会把成功那轮也停掉。
+  // 为什么拒绝后要记 blocked：
+  //   projection 的视图是重放的，下一轮事件回来时这条还在 recent 里。
+  //   不记 blocked 就会「等下一轮状态好转后把它补报上去」—— 那是骗自己。
+  const GATE_FILE = config?.gateFile || 'C:\\dsh\\_ops\\safe\\mindgate.state.json';
+  const GATE_TOLERANCE_MS = Number(config?.gateToleranceMs) || 2000;
+  const blocked = new Set();
+
+  function gateSays(item) {
+    let raw = '';
+    try {
+      raw = readFileSync(GATE_FILE, 'utf8');
+    } catch {
+      return true; // ① 没有门文件 → 放行
+    }
+    let st;
+    try {
+      st = JSON.parse(raw);
+    } catch {
+      return true; // ① 坏了也放行；宁可多收，不可因为一个坏文件停掉所有记忆
+    }
+    if (!st || typeof st !== 'object') return true;
+
+    const gateTurn = Number(st.turn_ts) || 0;
+    const turnMs = Number(item.ts) || 0;
+    // ② 不是同一轮（或都没时间戳）→ 放行
+    if (!gateTurn || !turnMs || Math.abs(gateTurn - turnMs) > GATE_TOLERANCE_MS) {
+      return true;
+    }
+    // ③ 同一轮且注入失败 → 拒
+    if (st.ok === false) {
+      trace(
+        '[autoreport] 门拒绝写回 turn=' + item.turn
+        + '：mindgate 没取到上下文（' + String(st.err || '').slice(0, 80) + '）',
+      );
+      return false;
+    }
+    return true;
+  }
 
   let token = '';
   try {
@@ -190,6 +243,12 @@ function makeReporter(config) {
   return function report(item) {
     if (!item || !item.done || !item.user) return false;
     if (sent.has(item.turn)) return false;
+    // 被判死过的那一轮永不重试：它不是「还没报」，是「不该报」
+    if (blocked.has(item.turn)) return false;
+    if (!gateSays(item)) {
+      blocked.add(item.turn);
+      return false;
+    }
 
     sent.add(item.turn); // 先占位，避免同一轮在几个连续事件里被重复发起
 

@@ -100,3 +100,43 @@ projection 的 state 是从会话事件流**重放**出来的，所以：
 - **只报「这一轮」**：`turn/start` 到 `turn/end` 之间的完整对话。子智能体的会话是独立 session，不在这个 projection 的范围内。
 - **不上报工具调用**：只取 `type:'text'` 的块。`reasoning` 和 `tool-call` 不进去 —— 卡那边 `/report` 的 `clean_store_text` 本来也会拦推理残渣。
 - **`sent` 是内存 Set**：重启会丢，最近 20 轮会重发一次。这是有意的取舍。
+
+---
+
+## 门：没注入上下文的那一轮，不写回卡（2026-11-27 加）
+
+跟 `dsh-numen-mindgate` 联动。它每轮把结果写成
+`C:\dsh\_ops\safe\mindgate.state.json`：
+
+```json
+{ "ok": true, "at": ..., "turn_ts": ..., "len": 4932, "ms": 1240, "err": "" }
+```
+
+`report()` 之前读它，**三条规则，顺序不能反**：
+
+```
+① 文件不存在 / 读不了 / 解析失败 / 缺 turn_ts  → 放行
+② |state.turn_ts - item.ts| > 2000ms          → 不是同一轮 → 放行
+③ ok === false 且是同一轮                      → 拒绝，记进 blocked（永不重试）
+```
+
+**为什么是「不写回」而不是「不让说」：**
+说错了能改，卡里那条废记忆要改就得删 —— 删记忆是动本体。
+**断熏习比断现行准。**
+
+**为什么 ① 要放行：** 一个坏文件不能把全部记忆停掉。**默认放行，不是默认拦截。**
+
+**为什么按 `turn_ts` 对齐而不是看最新状态：** 可能上一轮成功、这一轮失败交错着，
+看最新会把成功那轮也停掉。
+
+**为什么拒绝后记 `blocked`：** projection 视图是重放的，下一轮这条还在 `recent` 里；
+不记就会「等状态好转后补报上去」—— 那是骗自己。
+
+**配置**（`cordis.patch.yml` 的 `config`）：`gateFile`（默认
+`C:\dsh\_ops\safe\mindgate.state.json`）、`gateToleranceMs`（默认 2000）。
+
+**测试**：`node test\gate.mjs`（要在 profile 的 node_modules 里跑，源码目录没有 zod）。
+9 条断言，含两个容差边界（差 1.9 秒算同轮、2.1 秒不算）。
+
+**为什么联动不融合**：融合了回滚粒度就是整个包；而且两者是「组装时」和「轮次完成时」
+两个不同阶段的东西。这个包现在在正常工作，重写它收益不明、风险明确。

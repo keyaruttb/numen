@@ -36,7 +36,7 @@
 //   等于看了别人的信。宁可同步慢一次，也不要看错信。
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, appendFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 /** Cordis 插件名。 */
@@ -53,6 +53,12 @@ const SECTION = 'NUMEN_MIND_CONTEXT';
 // 写文件而不是 console.log：DSH 的 stdout 在会话里看不到。
 // 2026-11-22「原文表两个月没长过一条都没人发现」，就是这么来的。
 const LOG_FILE = 'C:\\dsh\\_ops\\safe\\mindgate.log';
+
+// 交给 autoreport 的「这一轮注入成功了吗」。
+// 为什么用文件而不是模块变量：两个插件是两个独立包，跨包读不到 module 级变量。
+// 为什么记 turn_ts：要让 autoreport 按**轮**对齐。可能上一轮成功、这一轮失败交错着，
+// 只看「最新状态」会把成功那轮的记忆也停掉。
+const GATE_FILE = 'C:\\dsh\\_ops\\safe\\mindgate.state.json';
 
 function trace(msg) {
   try {
@@ -153,15 +159,31 @@ function fetchContextSync(query, cfg) {
   return { ok: true, text: prompt, ms, err: '' };
 }
 
+// ---------------------------------------------------------------- 门状态
+
+/**
+ * 把「这一轮注入成功了吗」写给 autoreport。
+ * 默认放行不是默认拦截：文件写不出去只记日志，不阻止 autoreport 写卡。
+ */
+function writeGateState(state) {
+  try {
+    mkdirSync(dirname(GATE_FILE), { recursive: true });
+    writeFileSync(GATE_FILE, JSON.stringify(state), 'utf8');
+  } catch (err) {
+    trace('[mindgate] 写门状态失败（autoreport 会退化成照常上报）：' + (err?.message || err));
+  }
+}
+
 // ---------------------------------------------------------------- projection
 
-// 只记「最近一条真人说的话」。用它当 /context 的 query（召回按这句话算）。
+// 只记「最近一条真人说的话」+ 它的时间。用它当 /context 的 query（召回按这句话算），
+// 时间用来让 autoreport 判断「这一条是哪一轮的」。
 const mindgateProjection = {
   key: 'numenMindgate',
   stateVersion: 1,
   stateSchema: null,
   viewSchema: null,
-  init: () => ({ query: '', turns: 0 }),
+  init: () => ({ query: '', ts: 0, turns: 0 }),
   apply: (state, event) => {
     switch (event.type) {
       case 'user/message': {
@@ -176,7 +198,12 @@ const mindgateProjection = {
         }
         const q = parts.join('\n').trim();
         if (!q) return state;
-        return { query: q, turns: (state.turns || 0) + 1 };
+        return {
+          query: q,
+          // 用 user/message 自己的时间（跟 autoreport 的口径一致），不是 turn/start 的
+          ts: Number(event.time) || Date.now(),
+          turns: (state.turns || 0) + 1,
+        };
       }
       default:
         return state;
@@ -193,8 +220,8 @@ export async function apply(ctx, config = {}) {
     return;
   }
 
-  // ① 会话投影：知道这一轮他在说什么
-  let latest = '';
+  // ① 会话投影：知道这一轮他在说什么、是哪一轮
+  let latest = { query: '', ts: 0 };
   try {
     await ctx.sessionProjections.register(mindgateProjection);
     ctx.sessionProjections.onEventChanged((session, changes) => {
@@ -205,7 +232,9 @@ export async function apply(ctx, config = {}) {
         for (const change of changes || []) {
           if (!change || change.key !== 'numenMindgate') continue;
           const st = change.val;
-          if (st && typeof st.query === 'string' && st.query) latest = st.query;
+          if (st && typeof st.query === 'string' && st.query) {
+            latest = { query: st.query, ts: Number(st.ts) || 0 };
+          }
         }
       } catch (err) {
         trace('[mindgate] onEventChanged: ' + (err?.message || err));
@@ -225,20 +254,30 @@ export async function apply(ctx, config = {}) {
       text: () => {
         // query 空的时候也要取：身份/时间/状态/身体那几段不依赖问句。
         // 但卡的 /context 会拒空 message（empty_message），所以给一个占位符。
-        const q = latest || '__startup__';
+        const q = latest.query || '__startup__';
+        const turnTs = latest.ts || 0;
         STATS.calls += 1;
         // 同一句连续组装 → 复用，不重复打 /context
         if (CACHE.query === q && CACHE.ok && Date.now() - CACHE.at < 15000) {
           STATS.hits += 1;
+          writeGateState({
+            ok: true, at: CACHE.at, turn_ts: turnTs,
+            len: CACHE.text.length, ms: CACHE.ms, err: '', cached: true,
+          });
           return CACHE.text;
         }
         const r = fetchContextSync(q, cfg);
         CACHE = {
           query: q, text: r.text, ok: r.ok, at: Date.now(), ms: r.ms, err: r.err,
         };
+        // 告诉 autoreport：这一轮算不算数
+        writeGateState({
+          ok: r.ok, at: CACHE.at, turn_ts: turnTs,
+          len: r.text.length, ms: r.ms, err: r.err, cached: false,
+        });
         if (!r.ok) {
           STATS.fails += 1;
-          trace('[mindgate] /context 失败(' + r.ms + 'ms)：' + r.err);
+          trace('[mindgate] /context 失败(' + r.ms + 'ms)：' + r.err + ' → 这一轮不写回卡');
           return cfg.failText;
         }
         trace(
