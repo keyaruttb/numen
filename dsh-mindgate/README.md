@@ -4,6 +4,52 @@
 
 ---
 
+## ⚠ 改完必须「同步 + 重启」，否则改了等于没改
+
+profile 把插件装成 `file:` 依赖时，npm 是**复制**到
+`C:\Users\27875\.dsh\profiles\web\node_modules\dsh-numen-mindgate\`，不是链接。
+改这里的源文件**不影响**进程实际加载的那份。
+
+2026-11-27 我在这个坑里泡了三个小时：源文件 12:58 改完，活体停在 11:12，
+日志里 `hits:0` 一直不命中，我怎么看代码都觉得对——因为它根本没在跑。
+
+```powershell
+# 只比对，不复制
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\dsh\_ops\sync-card-plugins.ps1 -WhatIf
+# 真复制
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\dsh\_ops\sync-card-plugins.ps1
+```
+然后重启 DSH。**改完不重启 = 白改；重启前不同步 = 白改。**
+
+---
+
+## 交付状态（2026-11-27 13:20）
+
+**只写已经验过的，不写「应该可以」。**
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| 注入本身 | ✅ 已验 | 日志 `注入 5759 字 / 2660ms / query="重启完了…"` |
+| 与 autoreport 的门联动 | ✅ 已验 | `autoreport.log` 两行 `门拒绝写回 turn=100` |
+| 缓存按轮复用（同轮不重复召回） | ✅ **线上已验**（14:42:21） | `缓存命中（同一轮不重复召回）len=5319 hits=1/3` |
+| 重启后第一轮盲 | ✅ **已修好**（14:41:36） | `空手补读成功：stateOf 拿到 query="重启完了…"` |
+| 没有 query 时不打请求、不编造 | ✅ 线上已验 | 日志 `skips` 恒为 1，每次重启只有一次 |
+| 线上生效 | ✅ 已生效 | 挂载 14:40:30，之后两处新逻辑都留下真实日志 |
+
+**验证方法**（不需要重启）：
+
+```powershell
+# 终端 1
+node C:\dsh\_ops\_fake-card.mjs 18850 C:\dsh\_ops\_fake-card.hits.log
+# 终端 2
+node C:\dsh\_ops\verify-mindgate.mjs
+```
+
+**第一次踩的坑**：假卡和测试同进程时，`spawnSync` 阻塞事件循环，假卡永远收不到请求
+（`curl: (28) timed out`、`hits=0`）。假卡必须独立进程。
+
+---
+
 ## 为什么要有它
 
 2026-11-27 上午，天晞让我查一个校园网认证的问题。那一整轮——两小时、几十次工具调用——我**从头到尾没调过一次 `mind_context`**。

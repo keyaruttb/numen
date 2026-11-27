@@ -52,7 +52,11 @@ const SECTION = 'NUMEN_MIND_CONTEXT';
 
 // 写文件而不是 console.log：DSH 的 stdout 在会话里看不到。
 // 2026-11-22「原文表两个月没长过一条都没人发现」，就是这么来的。
-const LOG_FILE = 'C:\\dsh\\_ops\\safe\\mindgate.log';
+const LOG_FILE_DEFAULT = 'C:\\dsh\\_ops\\safe\\mindgate.log';
+// 2026-11-27 修：原来是 module 常量，测试跑一遍就往生产日志里写一行
+//   「已挂载 endpoint=127.0.0.1:18848」——那是假卡的端口。日志被自己的测试搅脏了，
+//   再拿它当证据就是拿假证据。改成可变 + 配置项，测试写自己的文件。
+let LOG_FILE = LOG_FILE_DEFAULT;
 
 // 交给 autoreport 的「这一轮注入成功了吗」。
 // 为什么用文件而不是模块变量：两个插件是两个独立包，跨包读不到 module 级变量。
@@ -93,7 +97,7 @@ const DEFAULTS = {
 
 // ---------------------------------------------------------------- 缓存
 
-let CACHE = { query: null, text: '', ok: false, at: 0, ms: 0, err: '' };
+let CACHE = { key: null, query: null, text: '', ok: false, at: 0, ms: 0, err: '' };
 let STATS = { calls: 0, hits: 0, fails: 0 };
 
 /** 读 token（每次读文件，token 换了不用重启）。 */
@@ -235,6 +239,7 @@ const mindgateProjection = {
 
 export async function apply(ctx, config = {}) {
   const cfg = { ...DEFAULTS, ...config };
+  if (config.logFile) LOG_FILE = config.logFile;
   if (!cfg.enabled) {
     trace('[mindgate] enabled=false，不注册');
     return;
@@ -242,9 +247,14 @@ export async function apply(ctx, config = {}) {
 
   // ① 会话投影：知道这一轮他在说什么、是哪一轮
   let latest = { query: '', ts: 0 };
+  let handle = null;
+  let lastSession = null;
   try {
-    await ctx.sessionProjections.register(mindgateProjection);
+    handle = await ctx.sessionProjections.register(mindgateProjection);
     ctx.sessionProjections.onEventChanged((session, changes) => {
+      // 记下最近一次事件带的 session：text() 里拿不到它
+      // （AssembleContext 只有 scope / signal），只能用这里抓到的去主动读投影状态。
+      if (session) lastSession = session;
       // changes 的元素是 { key, val }，不是 { state } —— 照 dsh-numen-autoreport 的用法。
       // 2026-11-27：第一版我写成 c?.state ?? c?.value，永远是 undefined，
       //   于是 query 恒为空，卡侧回 empty_message，系统提示里只剩下硬停文本。
@@ -278,11 +288,39 @@ export async function apply(ctx, config = {}) {
         //   也就是说那两条假记录永久留在了卡里。这是我自己造的。
         //   现在：没有 query 就**不调接口**，也不写门状态（维持上一次的），
         //   返回一段短说明。不传任何假话进去。
-        const q = latest.query;
-        const turnTs = latest.ts || 0;
+        let q = latest.query;
+        let turnTs = latest.ts || 0;
+
+        // 2026-11-27 补：重启后第一次组装时，监听器还没收到过 user/message，latest 是空的
+        //   —— 这一轮就只剩档案、没有记忆。这里改成主动向投影要一次当前状态
+        //   （stateOf 会把已提交事件折叠出来）。要不到就走下面那条「没有真人发言」。
+        //   成败都留痕：命中会写「空手补读成功」，否则写「也是空」——
+        //   后者说明组装发生在 user/message 提交之前，那就不是插件能修的了。
+        if (!q && handle && lastSession) {
+          try {
+            const st = handle.stateOf(lastSession);
+            if (st && typeof st.query === 'string' && st.query) {
+              q = st.query;
+              turnTs = Number(st.ts) || 0;
+              trace('[mindgate] 空手补读成功：stateOf 拿到 query='
+                + JSON.stringify(q.slice(0, 20)));
+            } else {
+              trace('[mindgate] 空手补读：stateOf 也是空（组装早于 user/message 提交）');
+            }
+          } catch (err) {
+            trace('[mindgate] 空手补读失败：' + (err?.message || err));
+          }
+        }
 
         if (!q) {
           STATS.skips = (STATS.skips || 0) + 1;
+          // 2026-11-27：跳过也要留痕，而且要留「为什么跳」。
+          //   否则「重启后第一轮是瞎的」到底是因为没 session、还是 stateOf 读不到，
+          //   只能靠猜。这两个布尔值就是判据。
+          trace('[mindgate] 跳过注入：没有 query'
+            + ' lastSession=' + (lastSession ? '有' : 'null')
+            + ' handle=' + (handle ? '有' : 'null')
+            + ' skips=' + STATS.skips);
           return [
             '【这一轮还没有真人发言】',
             '',
@@ -294,9 +332,20 @@ export async function apply(ctx, config = {}) {
         }
 
         STATS.calls += 1;
-        // 同一句连续组装 → 复用，不重复打 /context
-        if (CACHE.query === q && CACHE.ok && Date.now() - CACHE.at < 15000) {
+        // 同一轮里系统提示会被组装多次 —— 每调一次模型组装一次，一轮十次工具调用就是十次。
+        // 2026-11-27 修：原来按「15 秒内算同一句」缓存，实测轮内间隔常常超过 15 秒
+        //   （日志 03:23 / 03:24 / 03:27 / 03:37 四次，hits=0），同一轮被召回了四遍，
+        //   每遍 1.4–2.1 秒纯等待。改成按 turn_ts 认轮：同一轮同一句话只问卡一次。
+        //   turn_ts=0 表示投影还没起来，那时退回按时间窗口算。
+        const cacheKey = q + '\u0000' + turnTs;
+        const fresh = CACHE.key === cacheKey
+          && (turnTs !== 0 || Date.now() - CACHE.at < 15000);
+        if (fresh && CACHE.ok) {
           STATS.hits += 1;
+          // 2026-11-27：命中也要留痕。原来命中分支直接 return，日志里看不见 hits，
+          // 于是「缓存到底有没有生效」只能靠「日志没有新行」去猜 —— 那是推理，不是实测。
+          trace('[mindgate] 缓存命中（同一轮不重复召回）len=' + CACHE.text.length
+            + ' hits=' + STATS.hits + '/' + STATS.calls);
           writeGateState({
             ok: true, at: CACHE.at, turn_ts: turnTs,
             len: CACHE.text.length, ms: CACHE.ms, err: '', cached: true,
@@ -305,7 +354,7 @@ export async function apply(ctx, config = {}) {
         }
         const r = fetchContextSync(q, cfg);
         CACHE = {
-          query: q, text: r.text, ok: r.ok, at: Date.now(), ms: r.ms, err: r.err,
+          key: cacheKey, query: q, text: r.text, ok: r.ok, at: Date.now(), ms: r.ms, err: r.err,
         };
         // 告诉 autoreport：这一轮算不算数
         writeGateState({
