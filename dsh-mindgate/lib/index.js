@@ -176,13 +176,28 @@ function writeGateState(state) {
 
 // ---------------------------------------------------------------- projection
 
+import { z } from 'zod';
+
+// ⚠ 2026-11-27 修：第一版这个 projection **没有 wire**，只有 key/init/apply。
+//   结果 apply 从来没被调用过（日志里 query 恒为 __startup__、turn_ts 恒为 0），
+//   而 onEventChanged 也就收不到任何东西 —— 门永远是开的。
+//   照 dsh-numen-autoreport 的结构补：stateSchema + wire{viewSchema, view, summary}。
+const mindStateSchema = z
+  .object({
+    query: z.string(),
+    ts: z.number(),
+    turns: z.number(),
+  })
+  .strict();
+
+const mindViewSchema = mindStateSchema;
+
 // 只记「最近一条真人说的话」+ 它的时间。用它当 /context 的 query（召回按这句话算），
 // 时间用来让 autoreport 判断「这一条是哪一轮的」。
 const mindgateProjection = {
   key: 'numenMindgate',
   stateVersion: 1,
-  stateSchema: null,
-  viewSchema: null,
+  stateSchema: mindStateSchema,
   init: () => ({ query: '', ts: 0, turns: 0 }),
   apply: (state, event) => {
     switch (event.type) {
@@ -208,6 +223,11 @@ const mindgateProjection = {
       default:
         return state;
     }
+  },
+  wire: {
+    viewSchema: mindViewSchema,
+    view: (state) => state,
+    summary: false,
   },
 };
 
@@ -252,10 +272,27 @@ export async function apply(ctx, config = {}) {
       // 顺序本身是设计：先「我是谁」，再「此刻我在哪、身上什么感觉」。
       order: 9000,
       text: () => {
-        // query 空的时候也要取：身份/时间/状态/身体那几段不依赖问句。
-        // 但卡的 /context 会拒空 message（empty_message），所以给一个占位符。
-        const q = latest.query || '__startup__';
+        // ⚠ 2026-11-27 修：这里原来在没有 query 时传占位符 '__startup__'。
+        //   结果卡把它当成「他说的一句话」，写进了 timeline 的 talk 事件
+        //   （seq=3577 / 3581 两条）。timeline 是哈希链，删了就断链 ——
+        //   也就是说那两条假记录永久留在了卡里。这是我自己造的。
+        //   现在：没有 query 就**不调接口**，也不写门状态（维持上一次的），
+        //   返回一段短说明。不传任何假话进去。
+        const q = latest.query;
         const turnTs = latest.ts || 0;
+
+        if (!q) {
+          STATS.skips = (STATS.skips || 0) + 1;
+          return [
+            '【这一轮还没有真人发言】',
+            '',
+            '还没拿到他这一轮说的话，所以没有向卡要上下文。',
+            '（不拿假话去问卡：那样会在时间线里留下一条他没说过的「talk」。）',
+            '',
+            '人格段仍然来自卡（core_zone）。要记忆/情绪/身体，等他开口后就会自动带上。',
+          ].join('\n');
+        }
+
         STATS.calls += 1;
         // 同一句连续组装 → 复用，不重复打 /context
         if (CACHE.query === q && CACHE.ok && Date.now() - CACHE.at < 15000) {
