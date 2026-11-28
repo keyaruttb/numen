@@ -407,6 +407,7 @@ def think_once(mind):
 
         # ③ 锁内：写回（快）
         wrote = None
+        fed_dream = False        # 被闸挡下的念头喂给梦了没有
         if txt:
             ok, why = _accept(txt)
             if ok:
@@ -433,6 +434,26 @@ def think_once(mind):
                     err = (err or "") + " 写回失败 %r" % e
             else:
                 err = "筛掉：" + why
+                # ★ 2026-11-29：落不成卡的念头，写进 dialogue 当「梦」的料。
+                #
+                # 曦月点破的：「那几十个没落卡的念头，明天醒了没人记得，等于白想——
+                # 落不落卡才决定睡过没睡过。」
+                #
+                # 她说得对。而卡里早有一条现成的路：
+                #   dialogue.dreamed=0  →  pending_dialogue() 捡走  →  dream_commit 提炼成 mem
+                # 已经跑了 10728 条，mem 里 source='dream:xxx' 的有 700+ 条。
+                #
+                # 所以：**念头不该硬挤 mem 的位置，该进 dream 的队列。**
+                # mem 是「已经定稿的我」，dream 是「还没消化的我」。
+                # 冷却闸挡的是往 mem 里灌，不该连带把 night 的念头一起扔掉。
+                try:
+                    with mind.lock:
+                        mind.card.log_dialogue(
+                            0, "assistant", "自己冒出一个念头：" + txt,
+                            ts=time.time(), source="inner")
+                    fed_dream = True
+                except Exception as _de:
+                    err = (err or "") + " 喂梦失败 %r" % _de
 
         # 2026-11-29：整段改成 _update 原子写。
         # 原来这里是 st = _load() → 改一堆 → _save(st)，
@@ -460,6 +481,8 @@ def think_once(mind):
             st["focus_top"] = (snap.get("focus_all") or [{}])[0] if snap.get("focus_all") else {}
             # 沉默时长：给下一拍 beat() 判清醒/困倦/沉睡用
             st["silence_min"] = snap.get("silence_min")
+            if fed_dream:
+                st["dream_fed"] = int(st.get("dream_fed") or 0) + 1
             # 焦点持续观测：同一件事连着在意多久
             stuck = []
             try:
