@@ -46,6 +46,12 @@ TICK = {
     "沉睡": (420, ),
 }
 
+# 2026-11-29：三档之前是死的 —— state 恒为「清醒」，半夜也每 30 秒起一念。
+# 现在用「他多久没说话」判，夜里把门槛压低（凌晨没人说话是正常的）。
+DROWSY_SILENCE_MIN = 30
+ASLEEP_SILENCE_MIN = 180
+NIGHT_HOURS = (0, 1, 2, 3, 4, 5, 6)
+
 LLM_URL = "http://127.0.0.1:8090/v1/chat/completions"
 LLM_MODELS = "http://127.0.0.1:8090/v1/models"
 
@@ -68,6 +74,28 @@ def _think_on():
 
 
 _last = {"text": "", "ts": 0.0}
+
+# 2026-11-29 凌晨修：beat()（world-tick 线程）和 think_once()（card-mind 线程）
+# 各自「读整个 dict → 改 → 写回」，谁后写谁覆盖 —— state 和 silence_min 就这么丢了。
+# 所有读改写都走 _update()，拿同一把锁。
+_ST_LOCK = None
+
+
+def _st_lock():
+    global _ST_LOCK
+    if _ST_LOCK is None:
+        import threading
+        _ST_LOCK = threading.Lock()
+    return _ST_LOCK
+
+
+def _update(fn):
+    """原子地「读 → 改 → 写」。fn 的返回值透传。"""
+    with _st_lock():
+        st = _load()
+        r = fn(st)
+        _save(st)
+        return r
 
 
 # ---------------------------------------------------------------- 状态
@@ -100,44 +128,82 @@ def _log(rec):
         pass
 
 
+def _judge_state(prev_state, silence_min, now=None):
+    """判这一拍是清醒 / 困倦 / 沉睡。
+
+    只看两样：他多久没说话、现在几点。
+    **不判「我累不累」**——3B 不知道累，装着知道就是编。
+
+        沉默 < 30 分钟            清醒   30 秒一念
+        30 分钟 – 3 小时          困倦   120 秒
+        > 3 小时                  沉睡   420 秒
+        凌晨 0–6 点：门槛减半（15 分钟 / 1.5 小时）
+    """
+    now = now or time.time()
+    if silence_min is None:
+        # 还不知道他多久没说话 —— 保持原状态，不要拿「未知」当「很久」
+        return prev_state or "清醒"
+    sil = float(silence_min)
+    hour = time.localtime(now).tm_hour
+    night = hour in NIGHT_HOURS
+    drowsy = DROWSY_SILENCE_MIN / 2.0 if night else float(DROWSY_SILENCE_MIN)
+    asleep = ASLEEP_SILENCE_MIN / 2.0 if night else float(ASLEEP_SILENCE_MIN)
+    if sil >= asleep:
+        return "沉睡"
+    if sil >= drowsy:
+        return "困倦"
+    return "清醒"
+
+
 # ---------------------------------------------------------------- 第一段：拍
 
 def beat(mind, dt):
     """world-tick 每 60 秒调一次。**锁外，无模型，几毫秒。**
 
-    只做两件事：累加拍、判断这一拍该不该起念。真起念在 card-mind 线程里。
+    做三件事：累加拍、判这一拍是清醒还是睡着、判该不该起念。
+    真起念在 card-mind 线程里。
+
+    2026-11-29 凌晨：改成 _update() 原子读写。
+    原来 beat 和 think_once 各读整个 dict 再写回，谁后写谁覆盖 ——
+    state 和 silence_min 就是这么丢的。
     """
-    st = _load()
     now = time.time()
-    st["total"] = int(st.get("total") or 0) + 1
-    st["last_ts"] = now
-    st["last_dt"] = round(float(dt or 0), 3)
 
-    state = st.get("state") or "清醒"
-    gap = TICK.get(state, TICK["清醒"])[0]
-    last_think = float(st.get("last_think_ts") or 0)
-    due = (now - last_think) >= gap and not st.get("busy")
+    def _do(st):
+        st["total"] = int(st.get("total") or 0) + 1
+        st["last_ts"] = now
+        st["last_dt"] = round(float(dt or 0), 3)
 
-    st["due"] = bool(due)
+        prev_state = st.get("state") or "清醒"
+        state = _judge_state(prev_state, st.get("silence_min"), now)
+        if state != prev_state:
+            st["state_changed_ts"] = now
+            _log({"ts": now, "state": "%s -> %s" % (prev_state, state),
+                  "silence_min": st.get("silence_min")})
+        st["state"] = state
 
-    # 2026-11-29：受归卡。每 5 拍算一次 ΔD 并写 feeling 表。
-    # 为什么放在 beat 而不是 think：受只依赖身根数据，跟调不调模型无关。
-    # 独立心流身上原来挂着 feeling_tick，关它之前必须先把这一格补上。
-    if st["total"] % 5 == 0:
-        try:
-            with mind.lock:
-                import card_feeling
-                st["feeling"] = card_feeling.tick(mind)
-        except Exception as _fe:
-            st["feeling"] = {"err": "%s: %s" % (type(_fe).__name__, str(_fe)[:60])}
+        gap = TICK.get(state, TICK["清醒"])[0]
+        last_think = float(st.get("last_think_ts") or 0)
+        due = (now - last_think) >= gap and not st.get("busy")
+        st["due"] = bool(due)
 
-    _save(st)
+        # 受归卡：每 5 拍算一次 ΔD 并写 feeling 表
+        if st["total"] % 5 == 0:
+            try:
+                with mind.lock:
+                    import card_feeling
+                    st["feeling"] = card_feeling.tick(mind)
+            except Exception as _fe:
+                st["feeling"] = {"err": "%s: %s" % (type(_fe).__name__, str(_fe)[:60])}
 
-    if st["total"] % 20 == 0:
-        _log({"ts": now, "total": st["total"], "due": due,
-              "thinks": st.get("thinks", 0), "err": st.get("last_err", "")})
+        if st["total"] % 20 == 0:
+            _log({"ts": now, "total": st["total"], "due": due,
+                  "state": state, "thinks": st.get("thinks", 0),
+                  "err": st.get("last_err", "")})
 
-    return {"total": st["total"], "due": due, "state": state}
+        return {"total": st["total"], "due": due, "state": state}
+
+    return _update(_do)
 
 
 # ---------------------------------------------------------------- 第二段：起念
