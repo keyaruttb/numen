@@ -80,3 +80,11 @@ _split-*/
 # ---------- 两个自研插件：要入库，放行 ----------
 !dsh-autoreport/
 !dsh-thinking-guard/
+
+# ---------- 2026-11-29：心流搬进卡之后的运行态 ----------
+# 这些是每次运行会变的本地状态，不是代码，不该入库
+card_mind.state.json
+card_feeling.state.json
+card_mind.state.json.*
+card_feeling.state.json.*
+logs-8848/llama-server.log*

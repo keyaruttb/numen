@@ -1376,6 +1376,8 @@ class Handler(BaseHTTPRequestHandler):
                     "boot": getattr(m, "_boot", None),
                     "threads": _thread_lines(m),
                     "write_queue": _wq_lines(m),
+                    # 2026-11-29：本地模型归卡管之后，健康也在卡这里看
+                    "llm": _llm_lines(m),
                 })
             if method == "GET" and path == "/perf":
                 # 读写分离第一步的出口：最近 200 条请求的分段耗时（只元数据，不含正文）
@@ -1401,6 +1403,39 @@ class Handler(BaseHTTPRequestHandler):
                         _tid, "".join(traceback.format_stack(_f)[-6:])))
                 return self._send(200, {"ok": True, "stacks": _out})
 
+            if method == "GET" and path == "/llm":
+                # 2026-11-29：本地模型归卡管 —— 启动/健康/参数都从卡问
+                try:
+                    import card_llm as _lm
+                    m._llm = _lm
+                    return self._send(200, {"ok": True, "llm": _lm.info()})
+                except Exception as e:
+                    return self._send(500, {"ok": False, "error": str(e)[:200]})
+            if method == "POST" and path == "/llm/chat":
+                # 唯一的模型调用入口。心流（独立进程）也走这一条，不再自己打 8090。
+                try:
+                    import card_llm as _lm
+                    m._llm = _lm
+                    b = self._body()
+                    msgs = b.get("messages") or []
+                    if not msgs:
+                        return self._send(400, {"ok": False, "error": "E_NO_MESSAGES"})
+                    txt, err = _lm.chat(
+                        msgs,
+                        max_tokens=int(b.get("max_tokens") or 64),
+                        temperature=float(b.get("temperature") or 1.0),
+                        top_p=float(b.get("top_p") or 0.95),
+                        seed=b.get("seed"),
+                        timeout=float(b.get("timeout") or 90))
+                    if txt is None:
+                        return self._send(503, {"ok": False, "error": err})
+                    # 也回一份 OpenAI 形状，老的调用方（独立心流）不用改解析
+                    return self._send(200, {
+                        "ok": True, "text": txt, "llm": _lm.info(),
+                        "choices": [{"index": 0, "finish_reason": "stop",
+                                     "message": {"role": "assistant", "content": txt}}]})
+                except Exception as e:
+                    return self._send(500, {"ok": False, "error": str(e)[:200]})
             if method == "GET" and path == "/version":
                 # V7 第 18 件：版本矩阵（只读、缺项给 None、不抛）
                 try:
@@ -4368,6 +4403,18 @@ def _start_lease_keeper(mind):
     return t
 
 
+def _llm_lines(m):
+    """本地模型那一段。卡管着它，所以卡报它的健康。"""
+    try:
+        mod = getattr(m, "_llm", None)
+        if mod is None:
+            import card_llm as mod
+            m._llm = mod
+        return mod.info()
+    except Exception as e:
+        return {"up": None, "error": "%s: %s" % (type(e).__name__, str(e)[:120])}
+
+
 def _thread_lines(mind):
     """后台线程还活着吗（2026-11-11 稳定性）。
 
@@ -4733,6 +4780,15 @@ def _start_world_tick(mind):
             except Exception as e:
                 mind._world_tick_err = "%s: %s" % (type(e).__name__, e)
                 print("[mind] 后台 tick 失败：%s" % e)
+            # 2026-11-28 深夜：心流搬进卡的第一步（一卡化）。
+            # **必须锁外调用** —— 它以后要在这一格里调本地模型，几十秒，
+            # 塞进上面的 with mind.lock 会把整张卡锁死。
+            # 第一版只累加拍数、不读卡库、不调模型；抛异常也不能带死 world-tick。
+            try:
+                import card_mind
+                mind._card_mind = card_mind.beat(mind, dt)
+            except Exception as _cme:
+                mind._card_mind_err = "%s: %s" % (type(_cme).__name__, _cme)
 
     mind._world_tick_on = True          # 启动自检要能看出「世界在走」
     t = threading.Thread(target=loop, name="world-tick", daemon=True)
@@ -5321,6 +5377,19 @@ def main(argv=None):
         _start_world_tick(mind)
         _start_maintenance(mind)
         _start_lease_keeper(mind)
+        # 2026-11-29 凌晨：心流搬进卡第二步 —— 起念线程。
+        # 和 world-tick 分开：world-tick 管世界节拍（60 秒，锁内 1 秒），
+        # 这一条管起念（几十秒调模型，**锁外**）。合在一起世界会停摆。
+        # daemon=True + 内部 try/except：它崩了不能带死卡。
+        try:
+            import card_mind
+            _cm_th = card_mind.start(mind)
+            mind._card_mind_thread = _cm_th
+            print("[mind] card-mind 线程已起（起念=%s）"
+                  % ("开" if __import__("os").environ.get("CARD_MIND_THINK", "1") != "0" else "关"))
+        except Exception as _cme:
+            mind._card_mind_err = "%s: %s" % (type(_cme).__name__, _cme)
+            print("[mind] card-mind 起不来：%s" % _cme)
         # 写队列要在开始接请求之前就活着：第一轮聊天就走它。
         mind.wq_start()
     sys.stdout.flush()

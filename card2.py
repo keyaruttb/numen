@@ -7651,6 +7651,25 @@ class MemoryCard(MixHabit, LearnMixin, MixStore):
         # 人不会用「我的底线是 1. 2. 3.」这种方式认识自己。
         # 所以自述放在底线**之前** —— 先是我这个人，然后才是我的边界。
         narr = vals.get("self_narrative", "")
+        # 2026-11-28 甲：优先用 narrative.block()，退回 self_narrative。
+        #
+        # 为什么：narrative.py 里有四个函数 write/latest/history/**block**，
+        # block 的 docstring 写明「给上下文用的一段，太长就截断（max_chars=600）」——
+        # 上游本来就是为注入写的，但**从来没人调它**。
+        # 而这里一直读的是 core_zone.self_narrative 这个单值字段。
+        # 于是 narrative 表（带 rev 历史）和 self_narrative（单值）两套并存、各写各的。
+        #
+        # 现在接成：表里有最新一版就用表里的（带历史、可 vrev 回看），
+        # 表里没有才退回单值。**不删任何数据，不改变现有行为**——
+        # 现在的表里 rev2 和 self_narrative 内容一致（都是 11-27 去指代那版）。
+        try:
+            import narrative as _nrv_blk
+            _blk, _ = _nrv_blk.block(self.db, max_chars=600)
+            _from_table = (_blk or "").replace("【我自己的叙事】\n", "", 1).strip()
+            if _from_table:
+                narr = _from_table
+        except Exception:
+            pass  # 表坏了/没表，退回单值，不影响这一轮
         if narr:
             lines.append(narr)
 
