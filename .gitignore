@@ -88,3 +88,6 @@ card_feeling.state.json
 card_mind.state.json.*
 card_feeling.state.json.*
 logs-8848/llama-server.log*
+
+card_llm.state.json
+card_llm.state.json.*
