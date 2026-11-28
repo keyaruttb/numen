@@ -65,6 +65,12 @@ WRITE_COOLDOWN_S = 45 * 60      # 两条落卡之间至少 45 分钟
 WRITE_MAX_PER_DAY = 8           # 一天最多落 8 条
 WRITE_MIN_LEN = 8               # 短于这个字的，只起念不落卡
 
+# 2026-11-29：焦点持续观测。
+# 焦点稳定是**设计**（小凌第 05 集：新信息没有明显更强，不能挤掉原本的思路）。
+# 但对一件事连着在意几小时，那不是「想得深」，是着魔。
+FOCUS_STUCK_H = 2.0             # 超过这个小时数就单独留痕
+FOCUS_DROP_S = 1800             # 离开焦点超过 30 分钟才算真的走了
+
 # 起念开关：env CARD_MIND_THINK=0 关掉（只记账，不上模型）
 def _think_on():
     try:
@@ -304,6 +310,42 @@ def _accept(txt):
     return True, ""
 
 
+def _track_focus(st, picked, now):
+    """记每个焦点第一次进来是什么时候、待了多久。
+
+    返回这一拍「刚跨过阈值」的条目（每条只报一次）。
+    """
+    track = st.get("focus_track") or {}
+    keys = set()
+    for c in (picked or []):
+        keys.add(c["text"][:20])
+
+    for k in keys:
+        v = track.get(k)
+        if not v:
+            track[k] = {"since": now, "last": now, "n": 1}
+        else:
+            v["last"] = now
+            v["n"] = int(v.get("n") or 0) + 1
+
+    # 离开超过半小时的，才从表里清掉（留一点余量，别一闪一闪就重算）
+    for k in list(track):
+        if k in keys:
+            continue
+        if (now - float(track[k].get("last") or 0)) > FOCUS_DROP_S:
+            del track[k]
+
+    stuck = []
+    for k, v in track.items():
+        dur = now - float(v.get("since") or now)
+        if dur >= FOCUS_STUCK_H * 3600 and not v.get("warned"):
+            v["warned"] = now
+            stuck.append({"what": k, "hours": round(dur / 3600.0, 1),
+                          "n": int(v.get("n") or 0)})
+    st["focus_track"] = track
+    return stuck
+
+
 def _write_allowed(st, txt):
     """这道闸决定「能不能落卡」。起念不受限制，落卡受。"""
     now = time.time()
@@ -321,11 +363,15 @@ def _write_allowed(st, txt):
 
 def think_once(mind):
     """起念一次。**这个函数会被 card-mind 线程调，绝不能在 world-tick 里跑。**"""
-    st = _load()
-    if st.get("busy"):
+    def _claim(st):
+        if st.get("busy"):
+            return False
+        st["busy"] = True
+        return True
+
+    if not _update(_claim):
         return {"skip": "上一拍还没完"}
-    st["busy"] = True
-    _save(st)
+    st = _load()      # 只读一份给下面拿 rep / state 用
 
     t0 = time.time()
     try:
@@ -349,7 +395,10 @@ def think_once(mind):
                     snap["focus"] = []
                     snap["focus_err"] = "%s: %s" % (type(_ae).__name__, _ae)
         except Exception as e:
-            _save({**st, "busy": False, "last_err": "快照失败 %r" % e})
+            def _snapfail(st2):
+                st2["busy"] = False
+                st2["last_err"] = "快照失败 %r" % e
+            _update(_snapfail)
             return {"err": "快照失败"}
 
         # ② 锁外：调模型（慢，不拿锁）
@@ -361,11 +410,12 @@ def think_once(mind):
         if txt:
             ok, why = _accept(txt)
             if ok:
-                st0 = _load()
-                wok, wwhy = _write_allowed(st0, txt)
+                def _gate(st0):
+                    wok, wwhy = _write_allowed(st0, txt)
+                    return (wok, wwhy)
+                wok, wwhy = _update(_gate)
                 if not wok:
                     ok, why = False, wwhy
-                    _save(st0)
             if ok:
                 try:
                     with mind.lock:
@@ -384,42 +434,60 @@ def think_once(mind):
             else:
                 err = "筛掉：" + why
 
-        st = _load()
-        st["busy"] = False
-        st["last_think_ts"] = time.time()
-        st["thinks"] = int(st.get("thinks") or 0) + 1
-        st["last_ms"] = round((time.time() - t0) * 1000)
+        # 2026-11-29：整段改成 _update 原子写。
+        # 原来这里是 st = _load() → 改一堆 → _save(st)，
+        # 和 world-tick 里的 beat() 撞车：谁后写谁覆盖，state / silence_min 会丢。
+        def _finish(st):
+            st["busy"] = False
+            st["last_think_ts"] = time.time()
+            st["thinks"] = int(st.get("thinks") or 0) + 1
+            st["last_ms"] = round((time.time() - t0) * 1000)
+            if txt:
+                st["last_text"] = txt[:120]
+            if wrote:
+                st["wrote"] = int(st.get("wrote") or 0) + 1
+                st["last_mid"] = wrote
+                st["last_write_ts"] = time.time()
+                st["write_n"] = int(st.get("write_n") or 0) + 1
+            st["last_err"] = err or ""
+            # 作意：出现就加一声，没出现的退一声（喊两声就回神）
+            try:
+                import card_attention as _ca
+                st["rep"] = _ca.next_rep(st.get("rep"), snap.get("cands") or [])
+            except Exception:
+                pass
+            st["focus_n"] = len(snap.get("focus") or [])
+            st["focus_top"] = (snap.get("focus_all") or [{}])[0] if snap.get("focus_all") else {}
+            # 沉默时长：给下一拍 beat() 判清醒/困倦/沉睡用
+            st["silence_min"] = snap.get("silence_min")
+            # 焦点持续观测：同一件事连着在意多久
+            stuck = []
+            try:
+                stuck = _track_focus(st, snap.get("focus") or [], time.time())
+                if stuck:
+                    st["focus_stuck"] = stuck
+            except Exception as _tfe:
+                st["focus_track_err"] = "%s: %s" % (type(_tfe).__name__, str(_tfe)[:60])
+            return (st.get("last_ms"), stuck)
+
+        _ms, _stuck = _update(_finish)
         if txt:
-            st["last_text"] = txt[:120]
             _last["text"] = txt
             _last["ts"] = time.time()
-        if wrote:
-            st["wrote"] = int(st.get("wrote") or 0) + 1
-            st["last_mid"] = wrote
-            st["last_write_ts"] = time.time()
-            st["write_n"] = int(st.get("write_n") or 0) + 1
-        st["last_err"] = err or ""
-        # 作意：选中就加一声，没选中的退一声（喊三声才回神）
-        try:
-            import card_attention as _ca
-            st["rep"] = _ca.next_rep(st.get("rep"), snap.get("cands") or [])
-        except Exception:
-            pass
-        st["focus_n"] = len(snap.get("focus") or [])
-        st["focus_top"] = (snap.get("focus_all") or [{}])[0] if snap.get("focus_all") else {}
-        _save(st)
+        if _stuck:
+            _log({"ts": time.time(), "focus_stuck": _stuck})
 
-        _log({"ts": time.time(), "think": True, "ms": st["last_ms"],
+        _log({"ts": time.time(), "think": True, "ms": _ms,
               "text": (txt or "")[:60], "wrote": wrote, "err": err or "",
               "focus": [c["text"][:24] for c in (snap.get("focus") or [])],
               "focus_all": snap.get("focus_all")})
-        return {"text": txt, "wrote": wrote, "err": err, "ms": st["last_ms"]}
+        return {"text": txt, "wrote": wrote, "err": err, "ms": _ms}
     except Exception as e:
-        st = _load()
-        st["busy"] = False
-        st["last_err"] = "%s: %s" % (type(e).__name__, e)
-        _save(st)
-        return {"err": st["last_err"]}
+        def _fail(st):
+            st["busy"] = False
+            st["last_err"] = "%s: %s" % (type(e).__name__, e)
+            return st["last_err"]
+        return {"err": _update(_fail)}
 
 
 # ---------------------------------------------------------------- 线程
@@ -444,15 +512,15 @@ def start(mind, name="card-mind"):
                 r = think_once(mind)
                 _e = r.get("err") or ""
                 if _e and not _e.startswith("筛掉"):
-                    st2 = _load()
-                    st2["fail_streak"] = int(st2.get("fail_streak") or 0) + 1
-                    _save(st2)
+                    def _fs(st2):
+                        st2["fail_streak"] = int(st2.get("fail_streak") or 0) + 1
+                    _update(_fs)
                 time.sleep(5)
             except Exception as e:
                 try:
-                    st = _load()
-                    st["last_err"] = "%s: %s" % (type(e).__name__, e)
-                    _save(st)
+                    def _le(st):
+                        st["last_err"] = "%s: %s" % (type(e).__name__, e)
+                    _update(_le)
                 except Exception:
                     pass
                 time.sleep(30)   # 出事了慢一点，不要忙等

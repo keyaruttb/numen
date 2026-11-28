@@ -72,14 +72,37 @@ RESTART_COOLDOWN_S = 600
 WAIT_READY_S = 60
 PROBE_TIMEOUT = 3
 
+# 2026-11-29：计数要持久。原来只在内存里，卡一重启 spawns 就归零 ——
+# 那还是个不能当准数的数。只存计数和最后一次错误，不存别的。
+STATE = os.environ.get("CARD_LLM_STATE", r"C:\dsh\_card\card_llm.state.json")
+
 _state = {
     "fail_streak": 0,
     "last_restart": 0.0,
     "restarts": 0,
+    "spawns": 0,   # 真的把进程启动过几次（不重复计数）
     "last_err": "",
     "last_ok_ts": 0.0,
     "last_ms": 0,
 }
+
+
+def _load_state():
+    try:
+        d = json.load(open(STATE, encoding="utf-8"))
+        for k in ("restarts", "spawns", "last_restart", "last_err"):
+            if k in d:
+                _state[k] = d[k]
+    except Exception:
+        pass
+
+
+def _save_state():
+    try:
+        json.dump({k: _state.get(k) for k in ("restarts", "spawns", "last_restart", "last_err")},
+                  open(STATE, "w", encoding="utf-8"), ensure_ascii=False)
+    except Exception:
+        pass
 
 
 def _args():
@@ -137,7 +160,13 @@ def ensure(force=False):
                          stdout=lf, stderr=lf,
                          creationflags=0x08000000)   # CREATE_NO_WINDOW
         lf.close()
+        # 2026-11-29：这个数才是准数 —— 每真的 spawn 一次 +1，不会重复计。
+        # 原来只有 restarts，而它只在「等就绪成功」那一支 +1；
+        # 如果 stop 完旧 socket 还在应答，ensure 在第 109 行就 return 了，
+        # restarts 一次都不加 —— 那个数字不可信。
+        _state["spawns"] += 1
         _state["last_err"] = ""
+        _save_state()
     except Exception as e:
         _state["last_err"] = "%s: %s" % (type(e).__name__, str(e)[:80])
         return False
@@ -149,8 +178,10 @@ def ensure(force=False):
             _state["fail_streak"] = 0
             _state["restarts"] += 1
             _state["last_ok_ts"] = time.time()
+            _save_state()
             return True
     _state["last_err"] = "%ds 内没起来" % WAIT_READY_S
+    _save_state()
     return False
 
 
@@ -213,6 +244,7 @@ def stop(timeout=15):
             break
         time.sleep(0.5)
     _state["last_err"] = ""
+    _save_state()
     return {"ok": not _pids(), "stopped": stopped, "failed": failed,
             "still": _pids()}
 
@@ -220,9 +252,16 @@ def stop(timeout=15):
 def restart():
     """stop → ensure。换模型或卡住时用。"""
     r = stop()
+    # 等健康检查真的变成「不通」，最多 10 秒。
+    # 不等的话：旧 socket 可能还在应答，ensure() 第一行 `if health(): return True`
+    # 就直接返回 True —— 看着像「重起成功」，其实什么都没做。
+    deadline = time.time() + 10.0
+    while time.time() < deadline and health():
+        time.sleep(0.3)
+    died = not health()               # 在这里取，不能等 ensure 之后再取
     _state["last_restart"] = 0.0      # 显式重起，清掉冷却
     ok = ensure(force=True)
-    return {"stop": r, "ok": ok, **info()}
+    return {"stop": r, "ok": ok, "died": died, **info()}
 
 
 def chat(messages, max_tokens=64, temperature=1.0, top_p=0.95,
@@ -281,6 +320,7 @@ def info():
         "ngl": NGL,
         "auto": AUTO,
         "restarts": _state["restarts"],
+        "spawns": _state["spawns"],
         "fail_streak": _state["fail_streak"],
         "last_ms": _state["last_ms"],
         "last_err": _state["last_err"],
@@ -291,6 +331,9 @@ def info():
                    if os.path.exists(LOG) else 0),
         "busy": bool(_CHAT_LOCK and _CHAT_LOCK.locked()),
     }
+
+
+_load_state()
 
 
 def start():
